@@ -315,3 +315,17 @@ b { font-weight: 650; }
 .upd-bar i { display: block; height: 100%; background: var(--gold); transition: width .3s; }
 @keyframes updIn { from { transform: translateY(-100%); } to { transform: none; } }
 @keyframes updPulse { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+
+/* recent connections */
+.recent li { display: flex; gap: 6px; }
+.recent li .recent-main { flex: 1; min-width: 0; }
+.recent-left { display: flex; flex-direction: column; text-align: left; min-width: 0; }
+.recent-left small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-go { font-style: normal; font-size: 12.5px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.recent-go.saved { color: var(--gold); }
+.recent li .recent-x {
+  width: 38px; flex: none; border-radius: 10px; cursor: pointer; font-size: 18px; line-height: 1;
+  background: rgba(255,255,255,.03); border: 1px solid var(--line); color: var(--muted);
+}
+.recent li .recent-x:hover { border-color: var(--danger); color: var(--danger); }
+.switch.remember { margin-top: 12px; font-size: 13.5px; }

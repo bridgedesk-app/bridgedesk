@@ -1,5 +1,5 @@
 // BridgeDesk — десктоп агент (Electron)
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, clipboard, Tray, Menu, nativeImage, systemPreferences, shell, powerMonitor, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, clipboard, Tray, Menu, nativeImage, systemPreferences, shell, powerMonitor, Notification, safeStorage } = require('electron');
 const path = require('path');
 const os = require('os');
 const input = require('./input');
@@ -275,6 +275,13 @@ setInterval(() => {
   if (t && t !== lastClip) { lastClip = t; win.webContents.send('clip-changed', t.slice(0, 200000)); }
 }, 400);
 ipcMain.handle('get-clipboard', () => clipboard.readText());
+// remembered passwords for Recent connections — encrypted by the OS (Windows DPAPI / macOS Keychain)
+ipcMain.handle('secret-encrypt', (_e, text) => {
+  try { return safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(String(text)).toString('base64') : null; } catch { return null; }
+});
+ipcMain.handle('secret-decrypt', (_e, b64) => {
+  try { return safeStorage.decryptString(Buffer.from(String(b64), 'base64')); } catch { return null; }
+});
 // Автоматичен старт. Windows + администратор -> „Планирана задача“ с най-високи права (иначе Windows не го пуска).
 const TASK = 'BridgeDeskAutostart';
 function taskExists() {

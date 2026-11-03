@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('most', {
   onCursorShape: (cb) => ipcRenderer.on('cursor-shape', (_e, s) => cb(s)),
   setClipboard: (text) => ipcRenderer.send('set-clipboard', text),
   getClipboard: () => ipcRenderer.invoke('get-clipboard'),
+  encrypt: (t) => ipcRenderer.invoke('secret-encrypt', t),
+  decrypt: (b) => ipcRenderer.invoke('secret-decrypt', b),
   getAutostart: () => ipcRenderer.invoke('get-autostart'),
   setAutostart: (on) => ipcRenderer.send('set-autostart', on),
   setTray: (on) => ipcRenderer.send('set-tray', on),

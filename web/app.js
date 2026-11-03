@@ -422,12 +422,14 @@
   // =====================================================================
   const view = { peer: null, conn: null, call: null, id: null, control: false, stats: null, ping: null, timeout: null, held: new Set(), ended: true };
 
-  function connect(rawId, pass, isRetry) {
+  function connect(rawId, pass, isRetry, opts) {
+    opts = opts || {};
     const id = cleanId(rawId);
     if (id.length !== 9) return toast('The ID must be 9 digits', true);
     if (host.id && id === host.id) return toast('That is your own ID', true);
     view.id = id; view.pass = pass; view.ended = false;
     view.autoRetried = !!isRetry;
+    if (!isRetry) { view.remember = !!opts.remember; view.usedSaved = !!opts.usedSaved; }
     showConnecting('Connecting…', 'Looking for computer ' + fmtId(id) + '.');
 
     const peer = new Peer(peerOpts());
@@ -479,6 +481,7 @@
         view.hostName = msg.name || 'Computer';
         setupScreens(msg.screens || [], msg.screen || 0);
         saveRecent(view.id, view.hostName);
+        if (view.remember && view.pass && !view.usedSaved) savePass(view.id, view.pass);
         return;
       case 'deny': {
         if (msg.reason === 'restarting' && !view.autoRetried) {
@@ -488,6 +491,10 @@
           view.retryTimer = setTimeout(() => { connect(id, pass, true); }, 14000);
           $('#ovConnecting').hidden = false;
           return;
+        }
+        if (msg.reason === 'pass' && view.usedSaved) {
+          forgetPass(view.id);
+          return failView('The saved password for this computer no longer works — enter it again.');
         }
         const r = {
           pass: 'Wrong password.',
@@ -793,10 +800,37 @@
   // =====================================================================
   //  ПОСЛЕДНИ ВРЪЗКИ, НАСТРОЙКИ, СТАРТ
   // =====================================================================
+  // ---------- Recent connections + remembered passwords ----------
+  // In the desktop app passwords are encrypted by the operating system (Windows DPAPI / macOS Keychain).
   function saveRecent(id, name) {
-    const list = store.get('recent', []).filter((r) => r.id !== id);
-    list.unshift({ id, name, at: Date.now() });
-    store.set('recent', list.slice(0, 5));
+    const old = store.get('recent', []);
+    const prev = old.find((r) => r.id === id) || {};
+    const list = old.filter((r) => r.id !== id);
+    list.unshift({ ...prev, id, name, at: Date.now() });
+    store.set('recent', list.slice(0, 8));
+    renderRecent();
+  }
+  async function savePass(id, pass) {
+    let pw = null, enc = 'plain';
+    if (agent && agent.encrypt) { pw = await agent.encrypt(pass); enc = 'os'; }
+    if (!pw) { pw = btoa(unescape(encodeURIComponent(pass))); enc = 'plain'; }
+    const list = store.get('recent', []).map((r) => (r.id === id ? { ...r, pw, enc } : r));
+    store.set('recent', list);
+    renderRecent();
+  }
+  async function loadPass(r) {
+    if (!r || !r.pw) return null;
+    try {
+      if (r.enc === 'os') return agent && agent.decrypt ? await agent.decrypt(r.pw) : null;
+      return decodeURIComponent(escape(atob(r.pw)));
+    } catch { return null; }
+  }
+  function forgetPass(id) {
+    store.set('recent', store.get('recent', []).map((r) => { if (r.id !== id) return r; const c = { ...r }; delete c.pw; delete c.enc; return c; }));
+    renderRecent();
+  }
+  function removeRecent(id) {
+    store.set('recent', store.get('recent', []).filter((r) => r.id !== id));
     renderRecent();
   }
   function renderRecent() {
@@ -805,12 +839,30 @@
     $('#recentWrap').hidden = !list.length;
     list.forEach((r) => {
       const li = document.createElement('li');
-      const b = document.createElement('button'); b.type = 'button';
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'recent-main';
+      const left = document.createElement('div'); left.className = 'recent-left';
       const sp = document.createElement('span'); sp.textContent = fmtId(r.id);
       const sm = document.createElement('small'); sm.textContent = r.name || '';
-      b.append(sp, sm);
-      b.onclick = () => { $('#inId').value = fmtId(r.id); $('#inPass').focus(); };
-      li.appendChild(b); ul.appendChild(li);
+      left.append(sp, sm);
+      const right = document.createElement('em');
+      right.className = r.pw ? 'recent-go saved' : 'recent-go';
+      right.textContent = r.pw ? '🔑 Connect' : 'Connect';
+      b.append(left, right);
+      b.title = r.pw ? 'Password saved — click to connect' : 'Click to connect (you will be asked for a password or the other side must accept)';
+      b.onclick = async () => {
+        if (r.pw) {
+          const pw = await loadPass(r);
+          if (pw) { connect(r.id, pw, false, { usedSaved: true }); return; }
+          forgetPass(r.id);
+        }
+        $('#inId').value = fmtId(r.id);
+        $('#inPass').focus();
+      };
+      const x = document.createElement('button'); x.type = 'button'; x.className = 'recent-x';
+      x.title = r.pw ? 'Forget saved password' : 'Remove from list';
+      x.textContent = '×';
+      x.onclick = () => (r.pw ? forgetPass(r.id) : removeRecent(r.id));
+      li.append(b, x); ul.appendChild(li);
     });
   }
 
@@ -820,7 +872,7 @@
   });
   $('#connectForm').addEventListener('submit', (e) => {
     e.preventDefault();
-    connect($('#inId').value, $('#inPass').value.trim());
+    connect($('#inId').value, $('#inPass').value.trim(), false, { remember: $('#inRemember').checked });
   });
   $('#btnCancelConn').onclick = () => { clearTimeout(view.retryTimer); view.ended = false; endView(null); };
   $('#btnAccept').onclick = () => incomingResolve && incomingResolve(true);
