@@ -1,7 +1,7 @@
 {
   "name": "bridgedesk",
   "productName": "BridgeDesk",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "BridgeDesk — remote desktop access",
   "author": "BridgeDesk",
   "license": "MIT",
@@ -50,12 +50,6 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
           "arch": [
             "x64"
           ]
