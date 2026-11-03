@@ -1,0 +1,71 @@
+name: Release desktop app
+
+# How to publish an update:
+#   change "version" in agent/package.json (e.g. 0.3.1 -> 0.3.2) and commit to main.
+#   This workflow builds Windows + macOS, publishes GitHub release v<version>,
+#   and every installed BridgeDesk updates itself.
+on:
+  push:
+    branches: [main]
+    paths: ['agent/package.json']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      skip: ${{ steps.v.outputs.skip }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Create draft release for the new version
+        run: |
+          V=$(node -p "require('./agent/package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "Release v$V already exists - nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            gh release create "v$V" --draft --target "$GITHUB_SHA" --title "BridgeDesk v$V" --notes "BridgeDesk v$V"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: agent
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # no paid code signing yet
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent/package-lock.json
+      - run: npm ci
+      - name: Build and upload to the draft release
+        run: npm run release
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Publish the release (installed apps will now update)
+        run: gh release edit "v${{ needs.prepare.outputs.version }}" --draft=false --latest --repo "$GITHUB_REPOSITORY"

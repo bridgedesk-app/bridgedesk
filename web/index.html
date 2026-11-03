@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BridgeDesk — remote access</title>
+  <meta name="description" content="BridgeDesk — remote desktop access. Direct, encrypted connection.">
+  <meta name="theme-color" content="#000000">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self' https: wss: ws: http:">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app" class="app">
+
+  <!-- ============ HOME ============ -->
+  <div id="home" class="home">
+    <header class="top">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+          <rect width="64" height="64" rx="16" fill="#14213D"/>
+          <path d="M10 40 C 20 18, 44 18, 54 40" fill="none" stroke="#FCA311" stroke-width="5" stroke-linecap="round"/>
+          <path d="M8 44 H56" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+          <path d="M22 44 V31 M32 44 V27 M42 44 V31" stroke="#FCA311" stroke-width="3" stroke-linecap="round" opacity=".8"/>
+        </svg>
+        <div class="brand-text">
+          <span class="brand-name">BridgeDesk</span>
+          <span class="brand-sub">remote access</span>
+        </div>
+      </div>
+      <div class="top-right">
+        <button id="btnUpdate" class="update-pill" hidden></button>
+        <span id="netStatus" class="pill"><i></i><b>Offline</b></span>
+        <button id="btnSettings" class="icon-btn" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="cards">
+      <!-- This computer -->
+      <section class="card host-card">
+        <div class="card-head">
+          <span class="card-kicker">Get help</span>
+          <h2>This computer</h2>
+        </div>
+
+        <div id="hostIdle">
+          <p class="muted">In the browser you can share your screen <b>view-only</b>. To let someone control the mouse and keyboard, install the desktop app.</p>
+          <button id="btnShare" class="btn ghost wide">
+            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+            Share screen (view only)
+          </button>
+          <a id="btnDownload" class="btn primary wide" href="#" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+            Download for Windows / macOS
+          </a>
+        </div>
+
+        <div id="hostReady" hidden>
+          <p class="muted">Give these details to the person who will connect to you.</p>
+          <div class="field-label">Your ID</div>
+          <div class="id-row">
+            <div class="big-id" id="myId">--- --- ---</div>
+            <button class="icon-btn" data-copy="id" title="Copy ID" aria-label="Copy ID">
+              <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>
+            </button>
+          </div>
+          <div class="field-label">One-time password</div>
+          <div class="pass-row">
+            <code id="myPass">------</code>
+            <button id="btnNewPass" class="icon-btn" title="New password" aria-label="New password">
+              <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
+            </button>
+            <button class="icon-btn" data-copy="pass" title="Copy password" aria-label="Copy password">
+              <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>
+            </button>
+          </div>
+          <p id="hostNote" class="note"></p>
+          <div id="macPerms" class="mac-perms" hidden>
+            <b>macOS permissions</b>
+            <div class="perm-row"><span id="permScreen">Screen Recording</span><button class="btn ghost sm" data-perm="screen" type="button">Open</button></div>
+            <div class="perm-row"><span id="permAccess">Accessibility (mouse &amp; keyboard)</span><button class="btn ghost sm" data-perm="access" type="button">Open</button></div>
+            <small class="muted">Enable “BridgeDesk” in both, then click <a href="#" id="btnRelaunch">Restart BridgeDesk</a>.</small>
+          </div>
+          <button id="btnStopShare" class="btn ghost wide" hidden>Stop sharing</button>
+        </div>
+
+        <div id="hostActive" class="active-banner" hidden>
+          <span class="live-dot"></span>
+          <div class="grow">
+            <b id="activeName">—</b>
+            <small id="activeMode">is controlling this computer</small>
+          </div>
+          <button id="btnKick" class="btn danger sm">Disconnect</button>
+        </div>
+      </section>
+
+      <!-- Connect -->
+      <section class="card connect-card">
+        <div class="card-head">
+          <span class="card-kicker">Help someone</span>
+          <h2>Connect to another computer</h2>
+        </div>
+        <form id="connectForm" autocomplete="off">
+          <label class="field-label" for="inId">Remote computer ID</label>
+          <input id="inId" class="input id-input" inputmode="numeric" placeholder="123 456 789" maxlength="11" required>
+          <label class="field-label" for="inPass">Password <span class="muted">— optional</span></label>
+          <input id="inPass" class="input" type="password" placeholder="Without a password the other side must accept">
+          <button class="btn primary wide big" type="submit">
+            Connect
+            <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </form>
+        <div class="recent" id="recentWrap" hidden>
+          <div class="field-label">Recent connections</div>
+          <ul id="recentList"></ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      Direct encrypted connection between the two computers (WebRTC · DTLS-SRTP). The video never passes through our servers.
+    </footer>
+  </div>
+
+  <!-- ============ SESSION ============ -->
+  <section id="session" class="session" hidden>
+    <div class="toolbar" id="toolbar">
+      <div class="tb-left">
+        <span class="live-dot"></span>
+        <div class="tb-title">
+          <b id="sesName">—</b>
+          <small id="sesId">—</small>
+        </div>
+        <span id="sesMode" class="tag">view only</span>
+      </div>
+      <div class="tb-stats">
+        <span title="Latency"><em id="stPing">–</em> ms</span>
+        <span title="Resolution"><em id="stRes">–</em></span>
+        <span title="Frames per second"><em id="stFps">–</em> fps</span>
+        <span title="Stream bitrate"><em id="stRate">–</em> Mbps</span>
+        <span title="Connection type" id="stRoute" class="route">–</span>
+      </div>
+      <div class="tb-right">
+        <select id="selQuality" class="select" title="Quality">
+          <option value="smooth" selected>Smooth · 1080p 60</option>
+          <option value="hq">Sharp text · 1080p</option>
+          <option value="native">Native resolution (heavier)</option>
+          <option value="saver">Low bandwidth · 720p</option>
+        </select>
+        <select id="selScreen" class="select" title="Screen" hidden></select>
+        <button class="tb-btn ctl" id="btnClip" title="Send clipboard to remote (copy/paste also syncs automatically)">
+          <svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 10h6M9 14h6"/></svg>
+        </button>
+        <button class="tb-btn ctl" id="btnWin" title="Windows / Cmd key">
+          <svg viewBox="0 0 24 24"><path d="M4 5l7-1v7H4zM13 4l7-1v8h-7zM4 13h7v7l-7-1zM13 13h7v8l-7-1z"/></svg>
+        </button>
+        <button class="tb-btn ctl" id="btnAltTab" title="Alt + Tab">Alt⇥</button>
+        <button class="tb-btn" id="btnFull" title="Full screen">
+          <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
+        <button class="tb-btn" id="btnDiag" title="Diagnostics">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+        </button>
+        <button class="btn danger sm" id="btnHang">Disconnect</button>
+      </div>
+    </div>
+    <div class="stage" id="stage" tabindex="0">
+      <video id="remote" autoplay playsinline muted disablepictureinpicture></video>
+      <div id="diagPanel" class="diag" hidden><b>Diagnostics</b><div class="diag-row"><span>Waiting for data from the remote computer…</span></div></div>
+    </div>
+  </section>
+
+  <!-- ============ DIALOGS ============ -->
+  <div id="ovConnecting" class="overlay" hidden>
+    <div class="dialog center">
+      <div class="spinner"></div>
+      <h3 id="connTitle">Connecting…</h3>
+      <p id="connText" class="muted">Looking for the remote computer.</p>
+      <button id="btnCancelConn" class="btn ghost">Cancel</button>
+    </div>
+  </div>
+
+  <div id="ovIncoming" class="overlay" hidden>
+    <div class="dialog">
+      <div class="dlg-icon">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+      </div>
+      <h3>Incoming connection</h3>
+      <p><b id="incName">—</b> wants to <span id="incWhat">control this computer</span>.</p>
+      <p class="muted small">Only accept if you know this person.</p>
+      <div class="dlg-actions">
+        <button id="btnReject" class="btn ghost">Decline</button>
+        <button id="btnAccept" class="btn primary">Accept</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ovSettings" class="overlay" hidden>
+    <div class="dialog">
+      <h3>Settings</h3>
+      <label class="field-label" for="setName">Display name (shown to the other side)</label>
+      <input id="setName" class="input" maxlength="40" placeholder="e.g. Office PC">
+      <div id="agentSettings">
+        <div class="field-label">Permanent password <span class="muted">— unattended access without confirmation</span></div>
+        <div class="perm-status" id="permStatus">Off</div>
+        <input id="setPermOld" class="input" type="password" placeholder="Current password" autocomplete="current-password" hidden>
+        <input id="setPerm" class="input" type="password" minlength="8" placeholder="New password (at least 8 characters)" autocomplete="new-password">
+        <input id="setPerm2" class="input" type="password" minlength="8" placeholder="Repeat new password" autocomplete="new-password">
+        <label class="switch" id="permRemoveRow" hidden><input type="checkbox" id="setPermRemove"><span></span>Remove the permanent password</label>
+        <label class="switch"><input type="checkbox" id="setAuto"><span></span>Start with the computer</label>
+        <label class="switch"><input type="checkbox" id="setTray" checked><span></span>Keep running in the system tray when closed</label>
+        <div id="adminRow" hidden>
+          <label class="switch"><input type="checkbox" id="setAdmin" checked><span></span><div>Run as administrator <small class="muted">Needed only to control windows that run as administrator. On some computers it breaks screen capture — BridgeDesk then turns it off automatically.</small></div></label>
+          <div class="admin-state"><span id="adminState"></span> <button id="btnRelaunchAdmin" class="btn ghost sm" type="button" hidden>Restart as administrator</button></div>
+        </div>
+        <div class="version-row">
+          <span>Version <b id="appVersion">—</b> <small id="updText" class="muted"></small></span>
+          <button id="btnCheckUpd" class="btn ghost sm" type="button">Check for updates</button>
+        </div>
+      </div>
+      <div class="dlg-actions">
+        <button id="btnSetCancel" class="btn ghost">Close</button>
+        <button id="btnSetSave" class="btn primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+</div>
+
+<script src="config.js"></script>
+<script src="vendor/peerjs.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

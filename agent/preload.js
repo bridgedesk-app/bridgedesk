@@ -1,0 +1,42 @@
+// BridgeDesk — безопасен мост между страницата и Electron
+const { contextBridge, ipcRenderer } = require('electron');
+
+let info = { hostname: '', platform: process.platform, version: '' };
+try { info = ipcRenderer.sendSync('info-sync') || info; } catch { /* */ }
+
+contextBridge.exposeInMainWorld('most', {
+  isAgent: true,
+  hostname: info.hostname,
+  platform: info.platform,
+  version: info.version,
+  isAdmin: !!info.isAdmin,
+  captureCompat: !!info.captureCompat,
+  recover: (kind) => ipcRenderer.send('recover', kind),
+  listScreens: () => ipcRenderer.invoke('screens'),
+  selectScreen: (id) => ipcRenderer.invoke('select-screen', id),
+  screenState: () => ipcRenderer.invoke('screen-state'),
+  input: (msg) => ipcRenderer.send('input', msg),
+  inputDiag: () => ipcRenderer.invoke('input-diag'),
+  hideCursor: () => ipcRenderer.invoke('cursor-hide'),
+  restoreCursor: () => ipcRenderer.send('cursor-restore'),
+  onCursorShape: (cb) => ipcRenderer.on('cursor-shape', (_e, s) => cb(s)),
+  setClipboard: (text) => ipcRenderer.send('set-clipboard', text),
+  getClipboard: () => ipcRenderer.invoke('get-clipboard'),
+  getAutostart: () => ipcRenderer.invoke('get-autostart'),
+  setAutostart: (on) => ipcRenderer.send('set-autostart', on),
+  setTray: (on) => ipcRenderer.send('set-tray', on),
+  focus: () => ipcRenderer.send('focus'),
+  sessionState: (active, name) => ipcRenderer.send('session-state', active, name),
+  onInputBlocked: (cb) => ipcRenderer.on('input-blocked', (_e, d) => cb(d)),
+  macPerms: () => ipcRenderer.invoke('mac-perms'),
+  macOpenSettings: (which) => ipcRenderer.send('mac-open-settings', which),
+  relaunch: () => ipcRenderer.send('relaunch'),
+  getAdmin: () => ipcRenderer.invoke('get-admin'),
+  setAdmin: (on) => ipcRenderer.send('set-admin', on),
+  relaunchAdmin: () => ipcRenderer.send('relaunch-admin'),
+  onClipboard: (cb) => ipcRenderer.on('clip-changed', (_e, t) => cb(t)),
+  onUpdate: (cb) => ipcRenderer.on('update', (_e, st) => cb(st)),
+  updateState: () => ipcRenderer.invoke('update-state'),
+  checkUpdates: () => ipcRenderer.send('update-check'),
+  installUpdate: () => ipcRenderer.send('update-install'),
+});

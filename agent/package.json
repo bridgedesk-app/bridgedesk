@@ -1,0 +1,119 @@
+{
+  "name": "bridgedesk",
+  "productName": "BridgeDesk",
+  "version": "0.3.1",
+  "description": "BridgeDesk — remote desktop access",
+  "author": "BridgeDesk",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "sync-web": "node -e \"const fs=require('fs');fs.rmSync('web',{recursive:true,force:true});fs.cpSync('../web','web',{recursive:true})\"",
+    "start": "npm run sync-web && electron .",
+    "dist": "npm run sync-web && electron-builder --publish never",
+    "dist:win": "npm run sync-web && electron-builder --win --publish never",
+    "dist:mac": "npm run sync-web && electron-builder --mac --publish never",
+    "dist:linux": "npm run sync-web && electron-builder --linux --publish never",
+    "release": "npm run sync-web && electron-builder --publish always"
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "4.2.6",
+    "electron-updater": "^6.8.11",
+    "koffi": "^2.16.3"
+  },
+  "devDependencies": {
+    "electron": "^39.8.10",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.bridgedesk.app",
+    "productName": "BridgeDesk",
+    "copyright": "© 2026 BridgeDesk",
+    "files": [
+      "main.js",
+      "preload.js",
+      "input.js",
+      "win-input.js",
+      "win-cursor.js",
+      "elevate.js",
+      "web/**",
+      "assets/**",
+      "package.json",
+      "cursor-helper.js"
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "artifactName": "BridgeDesk-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "BridgeDesk",
+      "uninstallDisplayName": "BridgeDesk"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.utilities",
+      "artifactName": "BridgeDesk-${version}-${arch}.${ext}",
+      "extendInfo": {
+        "NSScreenCaptureUsageDescription": "BridgeDesk shows your screen to the person you accepted.",
+        "NSAppleEventsUsageDescription": "BridgeDesk controls the mouse and keyboard during a remote session."
+      }
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "assets/icon.png",
+      "category": "Network"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "bridgedesk-app",
+        "repo": "bridgedesk",
+        "releaseType": "draft"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bridgedesk-app/bridgedesk.git"
+  }
+}
