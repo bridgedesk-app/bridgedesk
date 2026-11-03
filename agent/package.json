@@ -94,7 +94,8 @@
       "extendInfo": {
         "NSScreenCaptureUsageDescription": "BridgeDesk shows your screen to the person you accepted.",
         "NSAppleEventsUsageDescription": "BridgeDesk controls the mouse and keyboard during a remote session."
-      }
+      },
+      "identity": "-"
     },
     "linux": {
       "target": [
