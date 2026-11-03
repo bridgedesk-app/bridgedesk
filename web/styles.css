@@ -292,3 +292,26 @@ b { font-weight: 650; }
 .switch small { display: block; margin-top: 3px; font-size: 12px; line-height: 1.4; }
 .dialog { max-height: calc(100vh - 40px); overflow-y: auto; }
 .admin-state { flex-wrap: wrap; }
+
+/* ---------- update banner ---------- */
+.upd-banner {
+  display: flex; align-items: center; gap: 16px; width: 100%;
+  padding: 14px clamp(18px, 4vw, 48px); border: 0; cursor: pointer; text-align: left;
+  background: var(--gold); color: var(--black); font: inherit;
+  box-shadow: 0 10px 30px -10px rgba(252,163,17,.55);
+  animation: updIn .35s ease-out;
+}
+.upd-banner:hover { background: #ffb43a; }
+.upd-banner .upd-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--black); color: var(--gold); flex: none; animation: updPulse 1.8s infinite; }
+.upd-banner .upd-icon svg { width: 22px; height: 22px; stroke-width: 2.6; }
+.upd-banner .upd-text { flex: 1; display: flex; flex-direction: column; line-height: 1.25; }
+.upd-banner .upd-text b { font-size: 17px; font-weight: 750; }
+.upd-banner .upd-text small { font-size: 13.5px; font-weight: 600; opacity: .8; }
+.upd-banner .upd-cta { padding: 10px 18px; border-radius: 10px; background: var(--black); color: var(--gold); font-weight: 750; white-space: nowrap; }
+.upd-banner.busy { background: var(--navy); color: var(--white); cursor: default; box-shadow: none; border-bottom: 1px solid rgba(252,163,17,.35); }
+.upd-banner.busy .upd-icon { background: var(--gold-soft); animation: none; }
+.upd-banner.busy .upd-cta { display: none; }
+.upd-bar { display: block; width: min(360px, 60vw); height: 4px; margin-top: 6px; border-radius: 4px; background: rgba(255,255,255,.12); overflow: hidden; max-width: 360px; }
+.upd-bar i { display: block; height: 100%; background: var(--gold); transition: width .3s; }
+@keyframes updIn { from { transform: translateY(-100%); } to { transform: none; } }
+@keyframes updPulse { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }

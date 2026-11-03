@@ -15,6 +15,14 @@
 
   <!-- ============ HOME ============ -->
   <div id="home" class="home">
+    <!-- big, impossible-to-miss update banner -->
+    <button id="updBanner" class="upd-banner" type="button" hidden>
+      <span class="upd-icon">
+        <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+      </span>
+      <span class="upd-text"><b id="updTitle">New update available</b><small id="updSub">Click here to update</small></span>
+      <span class="upd-cta" id="updCta">Update now</span>
+    </button>
     <header class="top">
       <div class="brand">
         <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
@@ -29,7 +37,6 @@
         </div>
       </div>
       <div class="top-right">
-        <button id="btnUpdate" class="update-pill" hidden></button>
         <span id="netStatus" class="pill"><i></i><b>Offline</b></span>
         <button id="btnSettings" class="icon-btn" title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
@@ -144,6 +151,7 @@
         <span title="Connection type" id="stRoute" class="route">–</span>
       </div>
       <div class="tb-right">
+        <button id="btnUpdate" class="update-pill" type="button" hidden>↑ Update ready</button>
         <select id="selQuality" class="select" title="Quality">
           <option value="smooth" selected>Smooth · 1080p 60</option>
           <option value="hq">Sharp text · 1080p</option>

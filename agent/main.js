@@ -1,5 +1,5 @@
 // BridgeDesk — десктоп агент (Electron)
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, clipboard, Tray, Menu, nativeImage, systemPreferences, shell, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, clipboard, Tray, Menu, nativeImage, systemPreferences, shell, powerMonitor, Notification } = require('electron');
 const path = require('path');
 const os = require('os');
 const input = require('./input');
@@ -49,6 +49,7 @@ const fs = require('fs');
 const { execFile } = require('child_process');
 
 app.setName('BridgeDesk');
+if (process.platform === 'win32') app.setAppUserModelId('com.bridgedesk.app'); // needed for Windows notifications
 
 // ---------- настройки на приложението (файл, четим се още преди старта) ----------
 const settingsFile = path.join(app.getPath('userData'), 'bridgedesk-settings.json');
@@ -209,6 +210,12 @@ function setupUpdates() {
   autoUpdater.on('download-progress', (p) => sendUpdate({ state: 'downloading', percent: Math.round(p.percent) }));
   autoUpdater.on('update-downloaded', (i) => {
     sendUpdate({ state: 'ready', version: i.version });
+    // system notification (visible even when BridgeDesk is hidden in the tray)
+    try {
+      const n = new Notification({ title: 'BridgeDesk — new update available', body: 'Version ' + i.version + ' is ready. Click here to update.', icon: path.join(__dirname, 'assets', 'icon.png') });
+      n.on('click', () => { if (win) { win.show(); win.focus(); } });
+      n.show();
+    } catch { /* */ }
     if (tray) tray.setToolTip('BridgeDesk — new version ' + i.version);
   });
   autoUpdater.on('update-not-available', () => sendUpdate({ state: 'none' }));

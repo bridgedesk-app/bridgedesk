@@ -897,23 +897,35 @@
   // обновления (само в приложението)
   function showUpdate(st) {
     const b = $('#btnUpdate'), t = $('#updText');
-    if (!b) return;
-    b.hidden = true; b.className = 'update-pill'; b.onclick = null;
+    const banner = $('#updBanner');
+    if (!b || !banner) return;
+    b.hidden = true; b.onclick = null;
+    banner.hidden = true; banner.className = 'upd-banner'; banner.onclick = null;
     if (st.state === 'downloading') {
-      b.hidden = false; b.classList.add('busy');
-      b.textContent = 'Downloading version ' + (st.version || '') + (st.percent ? ' · ' + st.percent + '%' : '');
+      banner.hidden = false; banner.classList.add('busy');
+      $('#updTitle').textContent = 'New update ' + (st.version ? 'v' + st.version + ' ' : '') + 'is downloading…';
+      $('#updSub').innerHTML = (st.percent ? st.percent + '%' : 'starting') + '<span class="upd-bar"><i></i></span>';
+      $('#updSub').querySelector('.upd-bar i').style.width = (st.percent || 2) + '%'; // set via JS (CSP blocks inline styles)
       t.textContent = 'downloading ' + (st.version || '');
     } else if (st.state === 'ready') {
-      b.hidden = false;
-      b.textContent = '↻ Update to ' + st.version;
-      b.onclick = () => {
-        if (host.viewer || !view.ended) return toast('End the current session first', true);
-        b.textContent = 'Updating…'; agent.installUpdate();
+      banner.hidden = false;
+      $('#updTitle').textContent = 'New update available' + (st.version ? ' — v' + st.version : '');
+      $('#updSub').textContent = 'Click here to update';
+      $('#updCta').textContent = 'Update now';
+      banner.onclick = () => {
+        if (host.viewer || !view.ended) return toast('End the current session first, then click Update', true);
+        $('#updTitle').textContent = 'Updating…';
+        $('#updSub').textContent = 'BridgeDesk will restart in a few seconds';
+        banner.classList.add('busy');
+        agent.installUpdate();
       };
+      // small reminder in the session toolbar too
+      b.hidden = false; b.className = 'update-pill'; b.textContent = '↑ Update ready';
+      b.onclick = () => toast('End the session, then click the gold banner to update');
       t.textContent = 'version ' + st.version + ' is ready';
     } else if (st.state === 'checking') t.textContent = 'checking…';
     else if (st.state === 'none') t.textContent = st.dev ? 'development mode' : 'you have the latest version';
-    else if (st.state === 'error') t.textContent = 'could not check';
+    else if (st.state === 'error') t.textContent = 'could not check' + (st.message ? ' (' + String(st.message).slice(0, 60) + ')' : '');
   }
   if (agent && agent.onUpdate) {
     $('#appVersion').textContent = agent.version || '—';
