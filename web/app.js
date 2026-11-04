@@ -429,6 +429,31 @@
     if (!v.calmSince) v.calmSince = now;
   }
 
+  // The video (standard engine) runs on its own peer connection. If it fails or never delivers a
+  // picture, it is rebuilt — the control connection and the session stay up (no more black screen).
+  function placeVideoCall(v) {
+    if (!v || !host.peer) return;
+    if (v.call) { try { v.call.close(); } catch { /* */ } }
+    const current = v.pump ? v.pump.track : v.rawTrack;
+    const stream = current ? new MediaStream([current]) : v.sendStream;
+    const call = host.peer.call(v.conn.peer, stream, { sdpTransform: tuneOffer });
+    v.call = call;
+    const pc = call.peerConnection;
+    // keep the video sender itself: its track is swapped (monitor switch, GPU engine on/off)
+    v.rtcSender = pc && pc.getSenders().find((x) => x.track && x.track.kind === 'video');
+    if (v.turbo && v.rtcSender) v.rtcSender.replaceTrack(null).catch(() => {});
+    if (pc) {
+      pc.addEventListener('connectionstatechange', () => {
+        if (host.viewer !== v || v.call !== call) return;
+        if (pc.connectionState === 'connected') applyQuality(host.quality || DEFAULT_Q);
+        if (pc.connectionState === 'failed' && v.conn.open) {
+          v.recalls = (v.recalls || 0) + 1;
+          if (v.recalls <= 5) setTimeout(() => { if (host.viewer === v) placeVideoCall(v); }, 500);
+        }
+      });
+    }
+  }
+
   async function accept(conn, name) {
     host.viewer = { conn, name, call: null, stream: null };
     host.quality = DEFAULT_Q;
@@ -489,17 +514,8 @@
       screen: host.screenIdx,
     });
 
-    const call = host.peer.call(conn.peer, sendStream, { sdpTransform: tuneOffer });
-    host.viewer.call = call;
-    const pc = call.peerConnection;
-    // keep the video sender itself: its track is swapped (monitor switch, GPU engine on/off)
-    host.viewer.rtcSender = pc && pc.getSenders().find((x) => x.track && x.track.kind === 'video');
-    if (pc) {
-      pc.addEventListener('connectionstatechange', () => {
-        if (pc.connectionState === 'connected') applyQuality(host.quality || DEFAULT_Q);
-        if (pc.connectionState === 'failed') endHostSession();
-      });
-    }
+    host.viewer.sendStream = sendStream;
+    placeVideoCall(host.viewer);
     track.addEventListener('ended', () => { if (host.viewer && host.viewer.rawTrack === track) endHostSession(); });
 
     host.viewer.autoTimer = setInterval(autoTick, 1000);
@@ -632,6 +648,7 @@
         return;
       case 'bye': endHostSession(); return;
       case 'turbo': if (msg.on) startTurbo().catch(console.error); else stopTurbo(); return;
+      case 'recall': if (host.viewer) placeVideoCall(host.viewer); return;
       case 'kf': if (host.viewer && host.viewer.turbo) host.viewer.turbo.requestKey(); return;
       case 'vstat': if (host.viewer && msg.trouble) host.viewer.viewerTrouble = true; return;
       case 'clip': if (agent) agent.setClipboard(String(msg.text || '').slice(0, 100_000)); return;
@@ -653,6 +670,7 @@
     if (id.length !== 9) return toast('The ID must be 9 digits', true);
     if (host.id && id === host.id) return toast('That is your own ID', true);
     view.id = id; view.pass = pass; view.ended = false;
+    view.sessionShown = false; view.recallCount = 0; view.noPicSince = 0;
     view.autoRetried = !!isRetry;
     if (!isRetry) { view.remember = !!opts.remember; view.usedSaved = !!opts.usedSaved; }
     showConnecting('Connecting…', 'Looking for computer ' + fmtId(id) + '.');
@@ -670,10 +688,11 @@
       conn.on('error', () => {});
     });
     peer.on('call', (call) => {
+      if (view.call && view.call !== call) { const old = view.call; view.call = null; try { old.close(); } catch { /* */ } }
       view.call = call;
       call.answer(undefined, { sdpTransform: tuneAnswer });
       call.on('stream', (s) => { lowLatency(call.peerConnection); showSession(s); });
-      call.on('close', () => endView('The session ended'));
+      call.on('close', () => { if (view.call === call && !view.recalling) endView('The session ended'); });
       const pc = call.peerConnection;
       if (pc) pc.addEventListener('connectionstatechange', () => {
         if (pc.connectionState === 'failed') endView('Could not establish a direct connection (try another network or a TURN server).', true);
@@ -706,6 +725,20 @@
         view.hostName = msg.name || 'Computer';
         view.hostTurbo = msg.turbo || null;
         maybeStartTurbo();
+        // the video connection must deliver a stream within 6 s, otherwise rebuild it
+        view.streamTries = 0;
+        const waitStream = () => {
+          view.streamTimer = setTimeout(() => {
+            if (view.ended || view.sessionShown) return;
+            if (view.receiver && view.receiver.stats.displayed > 0) { showSession(new MediaStream()); return; }
+            if (++view.streamTries <= 3 && view.conn && view.conn.open) {
+              showConnecting('Connecting video…', 'The picture connection is being rebuilt (attempt ' + view.streamTries + ').');
+              send({ t: 'recall' });
+              waitStream();
+            } else failView('Could not establish the video connection. Check the internet on both computers and try again.');
+          }, 6000);
+        };
+        waitStream();
         setupScreens(msg.screens || [], msg.screen || 0);
         saveRecent(view.id, view.hostName);
         if (view.remember && view.pass && !view.usedSaved) savePass(view.id, view.pass);
@@ -903,6 +936,24 @@
     if (sendOff && view.conn && view.conn.open) send({ t: 'turbo', on: false });
     return was;
   }
+  // Standard engine: no picture within 5 s (or picture stopped and never came back) → rebuild the
+  // video connection. The control connection stays up, so the session is not lost.
+  function videoWatch() {
+    if (view.turboActive || view.ended) return;
+    const now = performance.now();
+    const hasPicture = video.videoWidth > 0 && presented.fps > 0;
+    if (hasPicture) { view.noPicSince = 0; return; }
+    if (!view.noPicSince) view.noPicSince = now;
+    const limit = video.videoWidth > 0 ? 8000 : 5000;   // a static screen still gets ~10 fps from the host
+    if (now - view.noPicSince > limit && (view.recallCount || 0) < 4 && view.conn && view.conn.open) {
+      view.recallCount = (view.recallCount || 0) + 1;
+      view.noPicSince = now;
+      view.recalling = true; setTimeout(() => { view.recalling = false; }, 3000);
+      send({ t: 'recall' });
+      toast('No picture yet — reconnecting the video…');
+    }
+  }
+
   // called every second from the stats loop
   function turboWatch() {
     const r = view.receiver; if (!r) return;
@@ -954,6 +1005,9 @@
     const video = $('#remote');
     video.srcObject = stream;
     video.play().catch(() => {});
+    clearTimeout(view.streamTimer);
+    if (view.sessionShown) return;      // video connection was rebuilt — keep the running session UI
+    view.sessionShown = true;
     $('#home').hidden = true;
     const s = $('#session'); s.hidden = false;
     s.classList.toggle('control', view.control);
@@ -981,7 +1035,8 @@
   function endView(msg, err) {
     if (view.ended) return;
     view.ended = true;
-    clearTimeout(view.timeout);
+    clearTimeout(view.timeout); clearTimeout(view.streamTimer);
+    view.sessionShown = false;
     releaseAllKeys();
     try { view.conn && view.conn.open && view.conn.send({ t: 'bye' }); } catch { /* */ }
     stopTurboView(false);
@@ -1009,6 +1064,7 @@
     view.stats = setInterval(async () => {
       presentedTick();
       turboWatch();
+      videoWatch();
       const pc = view.call && view.call.peerConnection; if (!pc) return;
       const rep = await pc.getStats();
       let pairId = null;
