@@ -83,12 +83,14 @@
     AV1: { re: /^AV1$/i, test: 'video/AV1' },
     VP8: { re: /^VP8$/i, test: 'video/VP8' },
   };
-  let codecOrder = ['H264', 'VP8', 'VP9', 'AV1', 'H265']; // default when nothing is hardware-accelerated
+  let codecOrder = ['H264', 'VP8', 'H265', 'VP9', 'AV1']; // H.264 (OpenH264) is the lightest software encoder
   let codecInfo = 'default';
   async function detectHardwareCodecs() {
     if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.encodingInfo) return;
     const hw = [];
-    for (const name of ['H265', 'AV1', 'VP9', 'H264']) {
+    // Only H.265 is trusted: Chromium sends H.265 exclusively with a hardware encoder. For VP9/AV1/H.264
+    // "powerEfficient" does not guarantee WebRTC really uses the GPU (tested: VP9 still ran on libvpx).
+    for (const name of ['H265']) {
       try {
         const r = await navigator.mediaCapabilities.encodingInfo({
           type: 'webrtc',
@@ -99,8 +101,8 @@
     }
     if (hw.length) {
       codecOrder = [...hw, ...codecOrder.filter((c) => !hw.includes(c))];
-      codecInfo = 'hardware: ' + hw.join(', ');
-    } else codecInfo = 'no hardware codec found';
+      codecInfo = 'hardware: ' + hw.join(', ') + ' (used if the viewer can decode it)';
+    } else codecInfo = 'no hardware H.265 — using H.264';
   }
 
   function preferCodecs(sdp, order) {
@@ -318,11 +320,12 @@
       const gen = new MediaStreamTrackGenerator({ kind: 'video' });
       const reader = proc.readable.getReader();
       const writer = gen.writable.getWriter();
-      let last = null, lastAt = 0, busy = false, stopped = false;
+      let last = null, lastAt = 0, pending = 0, stopped = false;
+      const stats = { raw: 0, rawFps: 0, dropped: 0, t0: performance.now() };
       const write = async (frame) => {
-        busy = true;
+        pending++;
         try { await writer.write(frame); } catch { try { frame.close(); } catch { /* */ } }
-        busy = false;
+        pending--;
       };
       (async () => {
         while (!stopped) {
@@ -330,22 +333,26 @@
           try { r = await reader.read(); } catch { break; }
           if (r.done) break;
           const f = r.value;
+          stats.raw++;
+          const now = performance.now();
+          if (now - stats.t0 >= 1000) { stats.rawFps = Math.round(stats.raw * 1000 / (now - stats.t0)); stats.raw = 0; stats.t0 = now; }
           if (last) last.close();
           last = f.clone();
           lastAt = performance.now();
           const out = new VideoFrame(f, { timestamp: Math.round(performance.now() * 1000) });
           f.close();
-          if (busy) { out.close(); continue; } // encoder busy — drop instead of queueing (keeps latency low)
+          if (pending >= 3) { out.close(); stats.dropped++; continue; } // only drop if the encoder is really behind
           write(out);
         }
       })();
       const timer = setInterval(() => {
-        if (stopped || !last || busy) return;
+        if (stopped || !last || pending) return;
         if (performance.now() - lastAt < 95) return;
         lastAt = performance.now();
         write(new VideoFrame(last, { timestamp: Math.round(performance.now() * 1000) }));
       }, 100);
       return {
+        stats,
         track: gen,
         stop() {
           stopped = true; clearInterval(timer);
@@ -435,6 +442,7 @@
         try {
           const pc = host.viewer.call && host.viewer.call.peerConnection;
           d.codecInfo = codecInfo;
+          if (host.viewer.pump) { d.rawFps = host.viewer.pump.stats.rawFps; d.dropped = host.viewer.pump.stats.dropped; }
           const st = pc ? await pc.getStats() : null;
           if (st) st.forEach((r) => {
             if (r.type === 'outbound-rtp' && r.kind === 'video') {
@@ -705,7 +713,9 @@
     const fg = d.foreground;
     const rows = [
       ['Remote input mode', d.mode + (d.isAdmin ? ' · administrator' : ' · standard user')],
-      ['Remote capture / sent fps', (d.capFps != null ? Math.round(d.capFps) : '–') + ' / ' + (d.sendFps != null ? Math.round(d.sendFps) : '–')],
+      ['Windows capture fps', d.rawFps != null ? d.rawFps + (d.dropped ? ' (dropped ' + d.dropped + ')' : '') : '–'],
+      ['Remote encoded / sent fps', (d.capFps != null ? Math.round(d.capFps) : '–') + ' / ' + (d.sendFps != null ? Math.round(d.sendFps) : '–')],
+      ['Your decoder', view.decoder || '–'],
       ['Remote encoder', (d.codec ? d.codec + ' · ' : '') + (d.enc || '–') + (d.hw === true ? ' · hardware' : d.hw === false ? ' · software' : '') + (d.sendRes ? ' · ' + d.sendRes : '')],
       ['Remote GPU / HW encode', (d.gpuName || '?') + ' · ' + (d.gpuEncode || '?')],
       ['Remote codec check', d.codecInfo || '–'],
@@ -791,6 +801,7 @@
         if (r.type === 'inbound-rtp' && r.kind === 'video') {
           if (r.framesPerSecond != null) $('#stFps').textContent = Math.round(r.framesPerSecond);
           if (r.frameHeight) $('#stRes').textContent = r.frameWidth + '×' + r.frameHeight;
+          if (r.decoderImplementation) view.decoder = r.decoderImplementation + (r.powerEfficientDecoder ? ' · hardware' : r.powerEfficientDecoder === false ? ' · software' : '');
           if (lastTs) $('#stRate').textContent = (((r.bytesReceived - lastBytes) * 8) / ((r.timestamp - lastTs) * 1000)).toFixed(1);
           lastBytes = r.bytesReceived; lastTs = r.timestamp;
         }
