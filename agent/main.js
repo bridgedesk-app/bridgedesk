@@ -76,6 +76,10 @@ if (process.platform === 'win32') {
 // Lightweight: no HTTP disk cache (everything is loaded from local files anyway)
 app.commandLine.appendSwitch('disable-http-cache');
 app.commandLine.appendSwitch('disk-cache-size', '1');
+// Hardware video encoding (GPU) for the screen stream instead of the CPU:
+// allow it also on GPUs/drivers Chromium blocklists by default, and enable Media Foundation H.264 encoding.
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-features', 'MediaFoundationH264CbpEncoding,MediaFoundationVideoEncodeAccelerator,WebRtcAllowH265Send');
 
 // Съвместим режим на заснемане: без Windows Graphics Capture (ползва DXGI/GDI)
 const captureCompat = readSettings().captureCompat === true;
@@ -264,7 +268,16 @@ ipcMain.handle('cursor-hide', () => new Promise((resolve) => {
   p.send({ cmd: 'hide' });
 }));
 ipcMain.on('cursor-restore', () => cursorRestore());
-ipcMain.handle('input-diag', () => ({ ...input.diag(), isAdmin }));
+let gpuName = '';
+app.whenReady().then(() => app.getGPUInfo('basic').then((g) => {
+  const d = g && g.gpuDevice && (g.gpuDevice.find((x) => x.active) || g.gpuDevice[0]);
+  if (d) gpuName = (d.driverVendor || '') + ' ' + (d.deviceString || ('0x' + Number(d.deviceId || 0).toString(16)));
+}).catch(() => {}));
+ipcMain.handle('input-diag', () => {
+  let gpuEncode = '?';
+  try { gpuEncode = app.getGPUFeatureStatus().video_encode || '?'; } catch { /* */ }
+  return { ...input.diag(), isAdmin, gpuEncode, gpuName: gpuName.trim() };
+});
 // ---------- Клипборд: синхронизация в двете посоки по време на сесия ----------
 let lastClip = '';
 ipcMain.on('set-clipboard', (_e, text) => { lastClip = String(text); clipboard.writeText(lastClip); });

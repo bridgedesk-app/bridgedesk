@@ -82,10 +82,21 @@
     const h = new Set();
     lines.forEach((l) => { const m = /^a=rtpmap:(\d+) H264\/90000/i.exec(l); if (m) h.add(m[1]); });
     if (!h.size) return sdp;
+    // rank: constrained baseline + packetization-mode=1 first (hardware encoders support it best)
+    const rank = (pt) => {
+      const f = lines.find((l) => l.startsWith('a=fmtp:' + pt + ' ')) || '';
+      let r = 5;
+      if (/profile-level-id=42e0/i.test(f)) r = 0; else if (/profile-level-id=4200/i.test(f)) r = 1;
+      else if (/profile-level-id=4d/i.test(f)) r = 2; else if (/profile-level-id=64/i.test(f)) r = 3;
+      if (!/packetization-mode=1/.test(f)) r += 10;
+      return r;
+    };
+    const main = [...h].sort((a, b) => rank(a) - rank(b));
     lines.forEach((l) => { const m = /^a=fmtp:(\d+) apt=(\d+)/.exec(l); if (m && h.has(m[2])) h.add(m[1]); });
     const parts = lines[mi].split(' ');
     const list = parts.slice(3);
-    lines[mi] = [...parts.slice(0, 3), ...list.filter((p) => h.has(p)), ...list.filter((p) => !h.has(p))].join(' ');
+    const rtx = list.filter((p) => h.has(p) && !main.includes(p));
+    lines[mi] = [...parts.slice(0, 3), ...main.filter((p) => list.includes(p)), ...rtx, ...list.filter((p) => !h.has(p))].join(' ');
     return lines.join('\r\n');
   }
   function tuneSdp(sdp) {
@@ -654,6 +665,7 @@
       ['Remote input mode', d.mode + (d.isAdmin ? ' · administrator' : ' · standard user')],
       ['Remote capture / sent fps', (d.capFps != null ? Math.round(d.capFps) : '–') + ' / ' + (d.sendFps != null ? Math.round(d.sendFps) : '–')],
       ['Remote encoder', (d.enc || '–') + (d.hw === true ? ' · hardware' : d.hw === false ? ' · software' : '') + (d.sendRes ? ' · ' + d.sendRes : '')],
+      ['Remote GPU / HW encode', (d.gpuName || '?') + ' · ' + (d.gpuEncode || '?')],
       ['Quality limited by', d.limit && d.limit !== 'none' ? d.limit.toUpperCase() : 'nothing'],
       ['Moves (sent / received)', s('mm') + ' / ' + d.mm],
       ['Clicks (sent / received)', (s('md') + s('mu')) + ' / ' + (d.md + d.mu)],
