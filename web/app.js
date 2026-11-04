@@ -164,8 +164,26 @@
     }
     return out.join('\r\n');
   }
-  const tuneOffer = (sdp) => addBitrateHints(preferCodecs(sdp, codecOrder)); // host
-  const tuneAnswer = (sdp) => addBitrateHints(sdp);                          // viewer keeps the host's order
+  // Remove a codec (and its RTX / fmtp / rtcp-fb lines) from the SDP entirely.
+  function stripCodec(sdp, re) {
+    const lines = sdp.split('\r\n');
+    const pts = new Set();
+    lines.forEach((l) => { const m = /^a=rtpmap:(\d+) ([^/]+)\//.exec(l); if (m && re.test(m[2])) pts.add(m[1]); });
+    if (!pts.size) return sdp;
+    lines.forEach((l) => { const m = /^a=fmtp:(\d+) apt=(\d+)/.exec(l); if (m && pts.has(m[2])) pts.add(m[1]); });
+    const out = [];
+    for (const l of lines) {
+      const m = /^a=(rtpmap|fmtp|rtcp-fb):(\d+)[ ]/.exec(l);
+      if (m && pts.has(m[2])) continue;
+      if (l.startsWith('m=video')) { const p = l.split(' '); out.push([...p.slice(0, 3), ...p.slice(3).filter((x) => !pts.has(x))].join(' ')); continue; }
+      out.push(l);
+    }
+    return out.join('\r\n');
+  }
+  // H.265 produced a black screen (encoder delivered 0 frames) — never negotiate it.
+  const noH265 = (sdp) => stripCodec(sdp, /^(H265|HEVC)$/i);
+  const tuneOffer = (sdp) => addBitrateHints(preferCodecs(noH265(sdp), codecOrder)); // host
+  const tuneAnswer = (sdp) => addBitrateHints(noH265(sdp));                        // viewer
 
   // =====================================================================
   //  ХОСТ — компютърът, който се показва/управлява
@@ -389,16 +407,17 @@
     return turboCapPromise;
   }
 
-  async function startTurbo() {
+  async function startTurbo(sw) {
     const v = host.viewer; if (!v || v.turbo) return;
-    const cap = await turboCap();
+    // sw = backup path requested by the viewer (standard video gave no picture): software WebCodecs is fine
+    const cap = (await turboCap()) || (sw && window.BDTurbo ? await window.BDTurbo.hardwareEncoder(1920, 1080, true).catch(() => null) : null);
     const pc = v.conn.peerConnection;
     if (!cap || !pc || !v.rawTrack) { v.conn.send({ t: 'turbo-no', reason: cap ? 'no-channel' : 'no-hardware-encoder' }); return; }
     const q = presetFor(host.quality || DEFAULT_Q);
-    v.turbo = window.BDTurbo.createSender({ pc, track: v.rawTrack, codec: cap.codec, hw: cap.hw, quality: { maxH: q.maxH, fps: q.fps, bitrate: q.maxBitrate } });
+    v.turbo = window.BDTurbo.createSender({ pc, track: v.rawTrack, codec: cap.codec, hw: cap.hw, latency: cap.latency, quality: { maxH: q.maxH, fps: q.fps, bitrate: q.maxBitrate } });
     // pause the WebRTC video while the GPU engine runs (saves the CPU it was burning)
     if (v.rtcSender) v.rtcSender.replaceTrack(null).catch(() => {});
-    v.conn.send({ t: 'turbo-ok', codec: cap.codec, hw: cap.hw });
+    v.conn.send({ t: 'turbo-ok', codec: cap.codec, hw: cap.hw, sw: !!sw });
   }
   function stopTurbo() {
     const v = host.viewer; if (!v || !v.turbo) return;
@@ -538,6 +557,10 @@
             tv.resetLatency();
           }
           d.preset = host.quality === 'auto' ? presetFor('auto').label : (QUALITY[host.quality] || {}).label;
+          if (!host.probeResult && window.BDTurbo) { host.probeResult = 'checking…'; window.BDTurbo.probe().then((r) => { host.probeResult = r; }); }
+          d.probe = host.probeResult;
+          if (agent.gpuProfiles && !host.gpuProfiles) { host.gpuProfiles = '…'; agent.gpuProfiles().then((r) => { host.gpuProfiles = r; }).catch(() => {}); }
+          d.vea = host.gpuProfiles;
           if (agent.metrics) { try { d.res = await agent.metrics(); } catch { /* */ } }
           const st = pc ? await pc.getStats() : null;
           if (st) st.forEach((r) => {
@@ -609,8 +632,9 @@
     p.encodings[0].maxBitrate = q.maxBitrate;
     // резолюцията се сменя още при заснемането (не само при кодирането)
     const src = v.rawTrack || sender.track;
-    const h = (src && src.getSettings().height) || 1080;
-    p.encodings[0].scaleResolutionDownBy = q.maxH && h > q.maxH * 1.05 ? h / q.maxH : 1;
+    // the capture itself is already limited to the preset size (constraints above) — scaling here again
+    // shrank 720p to 800×450 (measured), so the encoder keeps the captured size
+    p.encodings[0].scaleResolutionDownBy = 1;
     p.encodings[0].maxFramerate = q.fps;
     p.degradationPreference = q.pref;
     try { if (sender.track) sender.track.contentHint = q.hint; } catch { /* */ }
@@ -647,7 +671,7 @@
         host.switching = (host.switching || Promise.resolve()).then(() => switchScreen(Number(msg.i))).catch(console.error);
         return;
       case 'bye': endHostSession(); return;
-      case 'turbo': if (msg.on) startTurbo().catch(console.error); else stopTurbo(); return;
+      case 'turbo': if (msg.on) startTurbo(!!msg.sw).catch(console.error); else stopTurbo(); return;
       case 'recall': if (host.viewer) placeVideoCall(host.viewer); return;
       case 'kf': if (host.viewer && host.viewer.turbo) host.viewer.turbo.requestKey(); return;
       case 'vstat': if (host.viewer && msg.trouble) host.viewer.viewerTrouble = true; return;
@@ -670,7 +694,7 @@
     if (id.length !== 9) return toast('The ID must be 9 digits', true);
     if (host.id && id === host.id) return toast('That is your own ID', true);
     view.id = id; view.pass = pass; view.ended = false;
-    view.sessionShown = false; view.recallCount = 0; view.noPicSince = 0;
+    view.sessionShown = false; view.recallCount = 0; view.noPicSince = 0; view.backupAsked = false;
     view.autoRetried = !!isRetry;
     if (!isRetry) { view.remember = !!opts.remember; view.usedSaved = !!opts.usedSaved; }
     showConnecting('Connecting…', 'Looking for computer ' + fmtId(id) + '.');
@@ -731,7 +755,13 @@
           view.streamTimer = setTimeout(() => {
             if (view.ended || view.sessionShown) return;
             if (view.receiver && view.receiver.stats.displayed > 0) { showSession(new MediaStream()); return; }
-            if (++view.streamTries <= 3 && view.conn && view.conn.open) {
+            if (view.streamTries >= 2 && startBackupPath()) {
+              view.streamTries++;
+              showConnecting('Connecting video…', 'Using the backup path for the picture.');
+              waitStream();
+              return;
+            }
+            if (++view.streamTries <= 4 && view.conn && view.conn.open) {
               showConnecting('Connecting video…', 'The picture connection is being rebuilt (attempt ' + view.streamTries + ').');
               send({ t: 'recall' });
               waitStream();
@@ -770,7 +800,10 @@
       }
       case 'clipboard': setLocalClipboard(String(msg.text || '')); return;
       case 'diag': renderDiag(msg.d); return;
-      case 'turbo-ok': view.turboHostHw = !!msg.hw; return;
+      case 'turbo-ok':
+        view.turboHostHw = !!msg.hw;
+        if (msg.sw && !view.receiver && !view.ended) startReceiver(msg.codec);
+        return;
       case 'turbo-no':
         stopTurboView(false);
         if (view.enginePref === 'turbo') toast('GPU engine not available on the remote computer (' + (msg.reason || '?') + ') — using Standard.', true);
@@ -886,6 +919,8 @@
 
     sec('Remote computer');
     row('GPU', (d.gpuName || '?') + ' · video encode ' + (d.gpuEncode || '?'));
+    row('HW encode profiles (Chromium)', d.vea || '–');
+    row('WebCodecs hardware probe', d.probe || '–');
     if (d.res) row('BridgeDesk CPU · memory', d.res.cpu + ' % · ' + d.res.memMB + ' MB');
     row('Input mode', d.mode + (d.isAdmin ? ' · administrator' : ' · standard user'));
     row('Active window', fg ? (fg.name + (fg.elevated ? ' ⚠ administrator' : '')) : '—');
@@ -904,6 +939,22 @@
   // ---------- GPU engine (viewer side) ----------
   const canvasEl = $('#turboCanvas');
   view.enginePref = store.get('engine', 'auto');
+  // Backup path (like AnyDesk's single connection): the picture travels over the control connection,
+  // which is up whenever the session is up. Used when the separate video connection gives no picture.
+  function startBackupPath() {
+    if (view.receiver || view.backupAsked || !window.BDTurbo || !window.BDTurbo.SUPPORTED) return false;
+    view.backupAsked = true;
+    toast('No picture over the video connection — switching to the backup path…');
+    send({ t: 'turbo', on: true, sw: true });
+    return true;
+  }
+  function startReceiver(codec) {
+    const pc = view.conn && view.conn.peerConnection;
+    if (!pc || view.receiver) return;
+    view.receiver = window.BDTurbo.createReceiver({ pc, canvas: canvasEl, codec, onKeyRequest: () => send({ t: 'kf' }) });
+    view.turboStartedAt = performance.now();
+    view.turboPrevLost = 0;
+  }
   async function maybeStartTurbo() {
     if (view.receiver || view.enginePref === 'standard') return;
     const ht = view.hostTurbo;
@@ -944,7 +995,8 @@
     const hasPicture = video.videoWidth > 0 && presented.fps > 0;
     if (hasPicture) { view.noPicSince = 0; return; }
     if (!view.noPicSince) view.noPicSince = now;
-    const limit = video.videoWidth > 0 ? 8000 : 5000;   // a static screen still gets ~10 fps from the host
+    const limit = video.videoWidth > 0 ? 6000 : 4000;   // a static screen still gets ~10 fps from the host
+    if (now - view.noPicSince > limit && (view.recallCount || 0) >= 1 && startBackupPath()) { view.noPicSince = now; return; }
     if (now - view.noPicSince > limit && (view.recallCount || 0) < 4 && view.conn && view.conn.open) {
       view.recallCount = (view.recallCount || 0) + 1;
       view.noPicSince = now;
@@ -1442,7 +1494,7 @@
   if (agent && agent.macPerms && agent.platform === 'darwin') { checkMacPerms(); macPermTimer = setInterval(checkMacPerms, 3000); }
 
   // старт
-  if (agent) detectHardwareCodecs().catch(() => {});
+  // (no codec auto-preference any more: H.264 is used; see preferCodecs)
   renderRecent();
   if (!agent) setNet('', 'Web version');
   if (agent) {

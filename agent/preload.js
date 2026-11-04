@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('most', {
   input: (msg) => ipcRenderer.send('input', msg),
   inputDiag: () => ipcRenderer.invoke('input-diag'),
   metrics: () => ipcRenderer.invoke('metrics'),
+  gpuProfiles: () => ipcRenderer.invoke('gpu-profiles'),
   hideCursor: () => ipcRenderer.invoke('cursor-hide'),
   restoreCursor: () => ipcRenderer.send('cursor-restore'),
   onCursorShape: (cb) => ipcRenderer.on('cursor-shape', (_e, s) => cb(s)),

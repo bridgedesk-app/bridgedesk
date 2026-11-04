@@ -79,12 +79,15 @@ app.commandLine.appendSwitch('disk-cache-size', '1');
 // Hardware video encoding (GPU) for the screen stream instead of the CPU:
 // allow it also on GPUs/drivers Chromium blocklists by default, and enable Media Foundation H.264 encoding.
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
-app.commandLine.appendSwitch('enable-features', 'MediaFoundationH264CbpEncoding,MediaFoundationVP9Encoding,PlatformHEVCEncoderSupport,WebRtcAllowH265Send,WebRtcAllowH265Receive');
+app.commandLine.appendSwitch('enable-features', 'MediaFoundationH264CbpEncoding');
+// H.265 in WebRTC is switched OFF: on an Intel UHD 770 host it negotiated H.265 and the encoder produced
+// zero frames (measured: black screen, 0 fps). H.264 is the proven path.
+app.commandLine.appendSwitch('disable-features', 'WebRtcAllowH265Send,WebRtcAllowH265Receive');
 
 // Съвместим режим на заснемане: без Windows Graphics Capture (ползва DXGI/GDI)
 const captureCompat = readSettings().captureCompat === true;
 if (process.platform === 'win32' && captureCompat) {
-  app.commandLine.appendSwitch('disable-features', 'AllowWgcScreenCapturer,AllowWgcWindowCapturer,AllowWgcZeroHz');
+  app.commandLine.appendSwitch('disable-features', 'WebRtcAllowH265Send,WebRtcAllowH265Receive,AllowWgcScreenCapturer,AllowWgcWindowCapturer,AllowWgcZeroHz');
 }
 
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
@@ -273,6 +276,15 @@ app.whenReady().then(() => app.getGPUInfo('basic').then((g) => {
   const d = g && g.gpuDevice && (g.gpuDevice.find((x) => x.active) || g.gpuDevice[0]);
   if (d) gpuName = (d.driverVendor || '') + ' ' + (d.deviceString || ('0x' + Number(d.deviceId || 0).toString(16)));
 }).catch(() => {}));
+// hardware video-encode profiles Chromium's GPU process reports (why the GPU engine is/isn't available)
+ipcMain.handle('gpu-profiles', async () => {
+  try {
+    const g = await app.getGPUInfo('complete');
+    const list = (g && (g.videoEncodeAcceleratorSupportedProfile || (g.auxAttributes && g.auxAttributes.videoEncodeAcceleratorSupportedProfile))) || [];
+    if (!list.length) return 'none reported';
+    return list.map((p) => String(p.profile).replace(/_?PROFILE/i, '') + (p.maxResolutionHeight ? ' ' + p.maxResolutionHeight + 'p' : '')).slice(0, 12).join(', ');
+  } catch (e) { return 'error: ' + e.message; }
+});
 // CPU / memory of all BridgeDesk processes (for the diagnostics panel)
 ipcMain.handle('metrics', () => {
   let cpu = 0, mem = 0;

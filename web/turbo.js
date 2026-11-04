@@ -25,8 +25,17 @@
   const MAX_BUFFERED = 2_000_000;   // bytes waiting in the DataChannel → drop new frames above this
   const KEY_INTERVAL_MS = 4000;     // safety keyframe even if nothing is lost
 
-  // H.264 profiles to try, best first. Level 5.1 (…33) covers up to 2560×1440 @ 60 fps.
-  const H264 = ['avc1.640033', 'avc1.4d0033', 'avc1.42e033', 'avc1.640028', 'avc1.42e028'];
+  // Codecs to try for the GPU engine, best first (H.264 levels 5.1 / 4.2 / 4.0 / 3.1, then HEVC, AV1, VP9).
+  const CANDIDATES = [
+    'avc1.640033', 'avc1.4d0033', 'avc1.42e033', 'avc1.64002a', 'avc1.42e02a', 'avc1.640028', 'avc1.42e028', 'avc1.42e01f', 'avc1.42001f',
+    'hvc1.1.6.L123.90', 'hev1.1.6.L123.90', 'av01.0.08M.08', 'vp09.00.40.08',
+  ];
+  // codec-specific encoder options
+  function codecOpts(codec) {
+    if (codec.startsWith('avc1')) return { avc: { format: 'annexb' } };
+    if (codec.startsWith('hvc1') || codec.startsWith('hev1')) return { hevc: { format: 'annexb' } };
+    return {};
+  }
 
   function openChannel(pc) {
     const dc = pc.createDataChannel('bd-turbo', { negotiated: true, id: CHANNEL_ID, ordered: false, maxPacketLifeTime: 120 });
@@ -38,20 +47,36 @@
   // ---------- capability check ----------
   // Returns { codec, hw:true } if this machine can encode H.264 in hardware, else null.
   // "prefer-hardware" in Chromium only succeeds with a real hardware encoder.
+  async function supported(codec, accel, w, h, fps, latency) {
+    try {
+      const cfg = Object.assign({ codec, width: w, height: h, bitrate: 8_000_000, framerate: fps, hardwareAcceleration: accel }, codecOpts(codec));
+      if (latency) cfg.latencyMode = latency;
+      const r = await VideoEncoder.isConfigSupported(cfg);
+      return !!r.supported;
+    } catch { return false; }
+  }
   async function hardwareEncoder(width = 1920, height = 1080, allowSoftware = false) {
     if (!SUPPORTED) return null;
-    for (const codec of H264) {
-      for (const accel of allowSoftware ? ['prefer-hardware', 'no-preference'] : ['prefer-hardware']) {
-        try {
-          const r = await VideoEncoder.isConfigSupported({
-            codec, width, height, bitrate: 12_000_000, framerate: 60,
-            hardwareAcceleration: accel, latencyMode: 'realtime', avc: { format: 'annexb' },
-          });
-          if (r.supported) return { codec, hw: accel === 'prefer-hardware' };
-        } catch { /* try next */ }
+    for (const accel of allowSoftware ? ['prefer-hardware', 'no-preference'] : ['prefer-hardware']) {
+      for (const codec of CANDIDATES) {
+        // realtime first; some hardware encoders only accept the default latency mode
+        for (const latency of ['realtime', null]) {
+          if (await supported(codec, accel, width, height, 60, latency)) return { codec, hw: accel === 'prefer-hardware', latency };
+        }
       }
     }
     return null;
+  }
+  // full matrix for diagnostics: which codecs pass in hardware at 1080p60 / 720p30
+  async function probe() {
+    if (!SUPPORTED) return 'WebCodecs not available';
+    const out = [];
+    for (const codec of CANDIDATES) {
+      const a = await supported(codec, 'prefer-hardware', 1920, 1080, 60, 'realtime') || await supported(codec, 'prefer-hardware', 1920, 1080, 60, null);
+      const b = a || await supported(codec, 'prefer-hardware', 1280, 720, 30, null);
+      if (a) out.push(codec + ':1080p60'); else if (b) out.push(codec + ':720p30');
+    }
+    return out.length ? out.join(', ') : 'no hardware encoder via WebCodecs';
   }
   async function hardwareDecoder(codec) {
     if (!SUPPORTED) return null;
@@ -67,7 +92,7 @@
   // =====================================================================
   //  HOST: encoder + sender
   // =====================================================================
-  function createSender({ pc, track, codec, hw, quality }) {
+  function createSender({ pc, track, codec, hw, latency, quality }) {
     const dc = openChannel(pc);
     let src = null, reader = null, gen = 0;           // current capture source (can be swapped: monitor switch)
     const st = {
@@ -91,11 +116,12 @@
         output: onChunk,
         error: (e) => { console.warn('[turbo] encoder', e); st.error = String(e && e.message || e); encoder = null; cfgKey = ''; },
       });
-      encoder.configure({
+      const cfg = Object.assign({
         codec, width: tw, height: th, bitrate: q.bitrate, framerate: q.fps,
-        hardwareAcceleration: hw ? 'prefer-hardware' : 'no-preference',
-        latencyMode: 'realtime', bitrateMode: 'variable', avc: { format: 'annexb' },
-      });
+        hardwareAcceleration: hw ? 'prefer-hardware' : 'no-preference', bitrateMode: 'variable',
+      }, codecOpts(codec));
+      if (latency !== null) cfg.latencyMode = latency || 'realtime';
+      encoder.configure(cfg);
       cfgKey = key; st.w = tw; st.h = th; st.bitrate = q.bitrate; needKey = true;
     }
 
@@ -333,5 +359,5 @@
     };
   }
 
-  window.BDTurbo = { SUPPORTED, hardwareEncoder, hardwareDecoder, createSender, createReceiver };
+  window.BDTurbo = { SUPPORTED, hardwareEncoder, hardwareDecoder, createSender, createReceiver, probe };
 })();
