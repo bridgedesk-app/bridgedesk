@@ -73,45 +73,84 @@
   // Заснемаме направо в 1080p — при 4K монитор това е много по-леко за компютъра (по-малко забавяне)
   const CAPTURE = { video: { frameRate: { ideal: 60, max: 60 }, width: { max: 1920 }, height: { max: 1080 } }, audio: false };
 
-  // Предпочитаме H.264 — повечето видеокарти го кодират хардуерно (по-бързо, по-малко забавяне)
-  function preferH264(sdp) {
-    if (C.preferH264 === false) return sdp;
+  // ---------- Codec choice ----------
+  // The host checks which codecs its GPU can encode in hardware (Media Capabilities "powerEfficient")
+  // and puts them first in the offer. Hardware encoding = smooth 60 fps with almost no CPU load.
+  const CODECS = {
+    H265: { re: /^(H265|HEVC)$/i, test: 'video/H265' },
+    H264: { re: /^H264$/i, test: 'video/H264;profile-level-id=42e01f;packetization-mode=1' },
+    VP9: { re: /^VP9$/i, test: 'video/VP9' },
+    AV1: { re: /^AV1$/i, test: 'video/AV1' },
+    VP8: { re: /^VP8$/i, test: 'video/VP8' },
+  };
+  let codecOrder = ['H264', 'VP8', 'VP9', 'AV1', 'H265']; // default when nothing is hardware-accelerated
+  let codecInfo = 'default';
+  async function detectHardwareCodecs() {
+    if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.encodingInfo) return;
+    const hw = [];
+    for (const name of ['H265', 'AV1', 'VP9', 'H264']) {
+      try {
+        const r = await navigator.mediaCapabilities.encodingInfo({
+          type: 'webrtc',
+          video: { contentType: CODECS[name].test, width: 1920, height: 1080, bitrate: 12_000_000, framerate: 60, scalabilityMode: 'L1T1' },
+        });
+        if (r.supported && r.powerEfficient) hw.push(name);
+      } catch { /* */ }
+    }
+    if (hw.length) {
+      codecOrder = [...hw, ...codecOrder.filter((c) => !hw.includes(c))];
+      codecInfo = 'hardware: ' + hw.join(', ');
+    } else codecInfo = 'no hardware codec found';
+  }
+
+  function preferCodecs(sdp, order) {
     const lines = sdp.split('\r\n');
     const mi = lines.findIndex((l) => l.startsWith('m=video'));
     if (mi < 0) return sdp;
-    const h = new Set();
-    lines.forEach((l) => { const m = /^a=rtpmap:(\d+) H264\/90000/i.exec(l); if (m) h.add(m[1]); });
-    if (!h.size) return sdp;
-    // rank: constrained baseline + packetization-mode=1 first (hardware encoders support it best)
-    const rank = (pt) => {
-      const f = lines.find((l) => l.startsWith('a=fmtp:' + pt + ' ')) || '';
-      let r = 5;
+    const parts = lines[mi].split(' ');
+    const list = parts.slice(3);
+    const nameOf = {}; const fmtp = {};
+    lines.forEach((l) => {
+      let m = /^a=rtpmap:(\d+) ([^/]+)\//.exec(l); if (m) nameOf[m[1]] = m[2];
+      m = /^a=fmtp:(\d+) (.*)$/.exec(l); if (m) fmtp[m[1]] = m[2];
+    });
+    const codecKey = (pt) => Object.keys(CODECS).find((k) => CODECS[k].re.test(nameOf[pt] || '')) || null;
+    const h264rank = (pt) => {
+      const f = fmtp[pt] || ''; let r = 5;
       if (/profile-level-id=42e0/i.test(f)) r = 0; else if (/profile-level-id=4200/i.test(f)) r = 1;
       else if (/profile-level-id=4d/i.test(f)) r = 2; else if (/profile-level-id=64/i.test(f)) r = 3;
       if (!/packetization-mode=1/.test(f)) r += 10;
       return r;
     };
-    const main = [...h].sort((a, b) => rank(a) - rank(b));
-    lines.forEach((l) => { const m = /^a=fmtp:(\d+) apt=(\d+)/.exec(l); if (m && h.has(m[2])) h.add(m[1]); });
-    const parts = lines[mi].split(' ');
-    const list = parts.slice(3);
-    const rtx = list.filter((p) => h.has(p) && !main.includes(p));
-    lines[mi] = [...parts.slice(0, 3), ...main.filter((p) => list.includes(p)), ...rtx, ...list.filter((p) => !h.has(p))].join(' ');
+    const primary = list.filter((pt) => codecKey(pt));
+    primary.sort((a, b) => {
+      const ka = order.indexOf(codecKey(a)), kb = order.indexOf(codecKey(b));
+      if (ka !== kb) return (ka < 0 ? 99 : ka) - (kb < 0 ? 99 : kb);
+      return codecKey(a) === 'H264' ? h264rank(a) - h264rank(b) : 0;
+    });
+    const rest = list.filter((pt) => !primary.includes(pt)); // rtx, red, ulpfec…
+    lines[mi] = [...parts.slice(0, 3), ...primary, ...rest].join(' ');
     return lines.join('\r\n');
   }
-  function tuneSdp(sdp) {
-    sdp = preferH264(sdp);
-    // висок начален битрейт — картината е ясна още от първата секунда
+
+  // high start bitrate so the picture is sharp from the first second (added to every video codec)
+  function addBitrateHints(sdp) {
     const lines = sdp.split('\r\n');
-    let inVideo = false;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith('m=')) inVideo = lines[i].startsWith('m=video');
-      if (inVideo && /^a=fmtp:\d+ /.test(lines[i]) && !/apt=/.test(lines[i]) && !/x-google-start-bitrate/.test(lines[i])) {
-        lines[i] += ';x-google-start-bitrate=8000;x-google-min-bitrate=1500;x-google-max-bitrate=30000';
-      }
+    const HINT = 'x-google-start-bitrate=8000;x-google-min-bitrate=1500;x-google-max-bitrate=30000';
+    const out = []; let inVideo = false;
+    const hasFmtp = new Set();
+    lines.forEach((l) => { const m = /^a=fmtp:(\d+) /.exec(l); if (m) hasFmtp.add(m[1]); });
+    for (const l of lines) {
+      if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
+      if (inVideo && /^a=fmtp:\d+ /.test(l) && !/apt=|x-google-start-bitrate/.test(l)) { out.push(l + ';' + HINT); continue; }
+      out.push(l);
+      const m = inVideo && /^a=rtpmap:(\d+) (VP8|VP9|AV1|H265)\//i.exec(l);
+      if (m && !hasFmtp.has(m[1])) out.push('a=fmtp:' + m[1] + ' ' + HINT);
     }
-    return lines.join('\r\n');
+    return out.join('\r\n');
   }
+  const tuneOffer = (sdp) => addBitrateHints(preferCodecs(sdp, codecOrder)); // host
+  const tuneAnswer = (sdp) => addBitrateHints(sdp);                          // viewer keeps the host's order
 
   // =====================================================================
   //  ХОСТ — компютърът, който се показва/управлява
@@ -376,7 +415,7 @@
       screen: host.screenIdx,
     });
 
-    const call = host.peer.call(conn.peer, sendStream, { sdpTransform: tuneSdp });
+    const call = host.peer.call(conn.peer, sendStream, { sdpTransform: tuneOffer });
     host.viewer.call = call;
     const pc = call.peerConnection;
     if (pc) {
@@ -395,9 +434,12 @@
         const d = await agent.inputDiag();
         try {
           const pc = host.viewer.call && host.viewer.call.peerConnection;
-          if (pc) (await pc.getStats()).forEach((r) => {
+          d.codecInfo = codecInfo;
+          const st = pc ? await pc.getStats() : null;
+          if (st) st.forEach((r) => {
             if (r.type === 'outbound-rtp' && r.kind === 'video') {
               d.enc = r.encoderImplementation || '?';
+              const cc = r.codecId && st.get(r.codecId); if (cc) d.codec = cc.mimeType.replace('video/', '');
               d.hw = r.powerEfficientEncoder;
               d.sendFps = r.framesPerSecond;
               d.limit = r.qualityLimitationReason;
@@ -531,7 +573,7 @@
     });
     peer.on('call', (call) => {
       view.call = call;
-      call.answer(undefined, { sdpTransform: tuneSdp });
+      call.answer(undefined, { sdpTransform: tuneAnswer });
       call.on('stream', (s) => { lowLatency(call.peerConnection); showSession(s); });
       call.on('close', () => endView('The session ended'));
       const pc = call.peerConnection;
@@ -664,8 +706,9 @@
     const rows = [
       ['Remote input mode', d.mode + (d.isAdmin ? ' · administrator' : ' · standard user')],
       ['Remote capture / sent fps', (d.capFps != null ? Math.round(d.capFps) : '–') + ' / ' + (d.sendFps != null ? Math.round(d.sendFps) : '–')],
-      ['Remote encoder', (d.enc || '–') + (d.hw === true ? ' · hardware' : d.hw === false ? ' · software' : '') + (d.sendRes ? ' · ' + d.sendRes : '')],
+      ['Remote encoder', (d.codec ? d.codec + ' · ' : '') + (d.enc || '–') + (d.hw === true ? ' · hardware' : d.hw === false ? ' · software' : '') + (d.sendRes ? ' · ' + d.sendRes : '')],
       ['Remote GPU / HW encode', (d.gpuName || '?') + ' · ' + (d.gpuEncode || '?')],
+      ['Remote codec check', d.codecInfo || '–'],
       ['Quality limited by', d.limit && d.limit !== 'none' ? d.limit.toUpperCase() : 'nothing'],
       ['Moves (sent / received)', s('mm') + ' / ' + d.mm],
       ['Clicks (sent / received)', (s('md') + s('mu')) + ' / ' + (d.md + d.mu)],
@@ -1092,6 +1135,7 @@
   if (agent && agent.macPerms && agent.platform === 'darwin') { checkMacPerms(); macPermTimer = setInterval(checkMacPerms, 3000); }
 
   // старт
+  if (agent) detectHardwareCodecs().catch(() => {});
   renderRecent();
   if (!agent) setNet('', 'Web version');
   if (agent) {

@@ -79,7 +79,7 @@ app.commandLine.appendSwitch('disk-cache-size', '1');
 // Hardware video encoding (GPU) for the screen stream instead of the CPU:
 // allow it also on GPUs/drivers Chromium blocklists by default, and enable Media Foundation H.264 encoding.
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
-app.commandLine.appendSwitch('enable-features', 'MediaFoundationH264CbpEncoding,MediaFoundationVideoEncodeAccelerator,WebRtcAllowH265Send');
+app.commandLine.appendSwitch('enable-features', 'MediaFoundationH264CbpEncoding,MediaFoundationVP9Encoding,PlatformHEVCEncoderSupport,WebRtcAllowH265Send,WebRtcAllowH265Receive');
 
 // Съвместим режим на заснемане: без Windows Graphics Capture (ползва DXGI/GDI)
 const captureCompat = readSettings().captureCompat === true;

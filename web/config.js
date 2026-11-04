@@ -15,9 +15,6 @@ window.MOST_CONFIG = {
   //  { urls: 'turn:turn.cloudflare.com:3478', username: '...', credential: '...' }]
   iceServers: null,
 
-  // H.264 (hardware encoding on most computers). false = let the browser choose.
-  preferH264: true,
-
   // Where the desktop app is downloaded from (shown in the web version).
   downloadUrl: 'https://github.com/bridgedesk-app/bridgedesk/releases/latest',
 };
