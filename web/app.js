@@ -256,6 +256,58 @@
     return captureScreen(host.screens[host.screenIdx].id);
   }
 
+  // ---------- Frame pump ----------
+  // Windows only delivers a new captured frame when something on the screen changes. With a static
+  // screen (and the remote cursor hidden) no frames arrive at all: the viewer stays black after
+  // connecting, or keeps showing the previous monitor after a switch. The pump re-sends the last
+  // frame at least 10 times per second, so the picture always arrives and never freezes.
+  function makePump(track) {
+    if (typeof MediaStreamTrackProcessor === 'undefined' || typeof MediaStreamTrackGenerator === 'undefined') return null;
+    try {
+      const proc = new MediaStreamTrackProcessor({ track });
+      const gen = new MediaStreamTrackGenerator({ kind: 'video' });
+      const reader = proc.readable.getReader();
+      const writer = gen.writable.getWriter();
+      let last = null, lastAt = 0, busy = false, stopped = false;
+      const write = async (frame) => {
+        busy = true;
+        try { await writer.write(frame); } catch { try { frame.close(); } catch { /* */ } }
+        busy = false;
+      };
+      (async () => {
+        while (!stopped) {
+          let r;
+          try { r = await reader.read(); } catch { break; }
+          if (r.done) break;
+          const f = r.value;
+          if (last) last.close();
+          last = f.clone();
+          lastAt = performance.now();
+          const out = new VideoFrame(f, { timestamp: Math.round(performance.now() * 1000) });
+          f.close();
+          if (busy) { out.close(); continue; } // encoder busy — drop instead of queueing (keeps latency low)
+          write(out);
+        }
+      })();
+      const timer = setInterval(() => {
+        if (stopped || !last || busy) return;
+        if (performance.now() - lastAt < 95) return;
+        lastAt = performance.now();
+        write(new VideoFrame(last, { timestamp: Math.round(performance.now() * 1000) }));
+      }, 100);
+      return {
+        track: gen,
+        stop() {
+          stopped = true; clearInterval(timer);
+          try { reader.cancel(); } catch { /* */ }
+          if (last) { try { last.close(); } catch { /* */ } last = null; }
+          try { gen.stop(); } catch { /* */ }
+          try { track.stop(); } catch { /* */ }
+        },
+      };
+    } catch (e) { console.warn('pump', e); return null; }
+  }
+
   async function accept(conn, name) {
     host.viewer = { conn, name, call: null, stream: null };
     host.quality = DEFAULT_Q;
@@ -287,6 +339,17 @@
     const track = stream.getVideoTracks()[0];
     try { track.contentHint = QUALITY[host.quality || DEFAULT_Q].hint; } catch { /* */ }
     if (agent) host.viewer.stream = stream;
+    // desktop app: send through the frame pump (keeps frames flowing on a static screen)
+    let sendStream = stream;
+    host.viewer.rawTrack = track;
+    if (agent) {
+      const pump = makePump(track);
+      if (pump) {
+        host.viewer.pump = pump;
+        try { pump.track.contentHint = track.contentHint; } catch { /* */ }
+        sendStream = new MediaStream([pump.track]);
+      }
+    }
 
     // Windows: hide the cursor in the captured picture; the viewer draws a local, instant cursor
     let localCursor = false;
@@ -302,7 +365,7 @@
       screen: host.screenIdx,
     });
 
-    const call = host.peer.call(conn.peer, stream, { sdpTransform: tuneSdp });
+    const call = host.peer.call(conn.peer, sendStream, { sdpTransform: tuneSdp });
     host.viewer.call = call;
     const pc = call.peerConnection;
     if (pc) {
@@ -311,7 +374,7 @@
         if (pc.connectionState === 'failed') endHostSession();
       });
     }
-    track.addEventListener('ended', () => endHostSession());
+    track.addEventListener('ended', () => { if (host.viewer && host.viewer.rawTrack === track) endHostSession(); });
 
     // диагностика към зрителя на всеки 2 секунди
     if (agent && agent.inputDiag) {
@@ -355,6 +418,7 @@
     try { v.conn.send({ t: 'bye' }); } catch { /* */ }
     try { v.call && v.call.close(); } catch { /* */ }
     setTimeout(() => { try { v.conn.close(); } catch { /* */ } }, 200);
+    if (v.pump) v.pump.stop();
     if (v.stream) v.stream.getTracks().forEach((t) => t.stop());
     clearInterval(v.diagTimer);
     if (agent) { agent.input({ t: 'ka' }); if (agent.restoreCursor) agent.restoreCursor(); agent.sessionState(false); }
@@ -375,17 +439,19 @@
     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
     p.encodings[0].maxBitrate = q.maxBitrate;
     // резолюцията се сменя още при заснемането (не само при кодирането)
-    if (sender.track && sender.track.applyConstraints) {
+    const src = v.rawTrack || sender.track;
+    if (src && src.applyConstraints) {
       const c = q.maxH
         ? { width: { max: Math.round(q.maxH * 16 / 9) }, height: { max: q.maxH }, frameRate: { max: q.fps } }
         : { frameRate: { max: q.fps } }; // без ограничение = оригиналната резолюция
-      sender.track.applyConstraints(c).catch((e) => console.warn('constraints', e));
+      src.applyConstraints(c).catch((e) => console.warn('constraints', e));
     }
-    const h = (sender.track && sender.track.getSettings().height) || 1080;
+    const h = (src && src.getSettings().height) || 1080;
     p.encodings[0].scaleResolutionDownBy = q.maxH && h > q.maxH * 1.05 ? h / q.maxH : 1;
     p.encodings[0].maxFramerate = q.fps;
     p.degradationPreference = q.pref;
     try { if (sender.track) sender.track.contentHint = q.hint; } catch { /* */ }
+    try { if (src) src.contentHint = q.hint; } catch { /* */ }
     sender.setParameters(p).catch((e) => console.warn('quality', e));
   }
 
@@ -396,18 +462,26 @@
     const s = await captureScreen(host.screens[idx].id);
     const track = s.getVideoTracks()[0];
     try { track.contentHint = QUALITY[host.quality || DEFAULT_Q].hint; } catch { /* */ }
+    const pump = makePump(track);
+    if (pump) { try { pump.track.contentHint = track.contentHint; } catch { /* */ } }
     const sender = v.call.peerConnection.getSenders().find((x) => x.track && x.track.kind === 'video');
-    await sender.replaceTrack(track);
-    if (v.stream) v.stream.getTracks().forEach((t) => t.stop());
-    v.stream = s;
-    track.addEventListener('ended', () => endHostSession());
+    const oldPump = v.pump, oldStream = v.stream;
+    await sender.replaceTrack(pump ? pump.track : track);
+    v.pump = pump; v.rawTrack = track; v.stream = s;
+    if (oldPump) oldPump.stop();
+    if (oldStream) oldStream.getTracks().forEach((t) => t.stop());
+    track.addEventListener('ended', () => { if (host.viewer === v && v.rawTrack === track) endHostSession(); });
+    applyQuality(host.quality || DEFAULT_Q); // same resolution / fps limits for the new monitor
+    if (v.conn.open) v.conn.send({ t: 'screen-ok', i: idx });
   }
 
   function onViewerMsg(msg) {
     switch (msg.t) {
       case 'ping': host.viewer && host.viewer.conn.send({ t: 'pong', ts: msg.ts }); return;
       case 'q': applyQuality(msg.v); return;
-      case 'screen': switchScreen(Number(msg.i)).catch(console.error); return;
+      case 'screen': // one switch at a time
+        host.switching = (host.switching || Promise.resolve()).then(() => switchScreen(Number(msg.i))).catch(console.error);
+        return;
       case 'bye': endHostSession(); return;
       case 'clip': if (agent) agent.setClipboard(String(msg.text || '').slice(0, 100_000)); return;
       case 'mm': case 'md': case 'mu': case 'wh': case 'kd': case 'ku': case 'kt': case 'ka':
@@ -510,6 +584,7 @@
       }
       case 'clipboard': setLocalClipboard(String(msg.text || '')); return;
       case 'diag': renderDiag(msg.d); return;
+      case 'screen-ok': toast('Showing screen ' + (Number(msg.i) + 1)); return;
       case 'cur': if (view.localCursor) setViewCursor(String(msg.s || 'default')); return;
       case 'warn':
         if (msg.code === 'elevated') {
@@ -768,7 +843,7 @@
   $('#btnDiag').onclick = () => { $('#diagPanel').hidden = !$('#diagPanel').hidden; stage.focus(); };
   $('#btnHang').onclick = () => endView('The session ended');
   $('#selQuality').onchange = (e) => { send({ t: 'q', v: e.target.value }); stage.focus(); };
-  $('#selScreen').onchange = (e) => { send({ t: 'screen', i: Number(e.target.value) }); stage.focus(); };
+  $('#selScreen').onchange = (e) => { send({ t: 'screen', i: Number(e.target.value) }); toast('Switching to screen ' + (Number(e.target.value) + 1) + '…'); stage.focus(); };
   $('#btnWin').onclick = () => { send({ t: 'kt', keys: ['MetaLeft'] }); stage.focus(); };
   $('#btnAltTab').onclick = () => { send({ t: 'kt', keys: ['AltLeft', 'Tab'] }); stage.focus(); };
   $('#btnClip').onclick = async () => {
