@@ -40,10 +40,12 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.skip != 'true'
     strategy:
-      fail-fast: true
+      fail-fast: false            # a slow/failed macOS runner must not block the Windows release
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     defaults:
       run:
         working-directory: agent
@@ -63,6 +65,8 @@ jobs:
 
   publish:
     needs: [prepare, build]
+    # publish as soon as the builds finished; macOS is optional (continue-on-error above)
+    if: always() && needs.prepare.outputs.skip != 'true' && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
