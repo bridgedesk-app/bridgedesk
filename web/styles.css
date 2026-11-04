@@ -206,9 +206,9 @@ b { font-weight: 650; }
 .session.view-only .ctl { display: none; }
 
 .stage { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; outline: none; overflow: hidden; }
-.stage video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.stage video, .stage canvas { width: 100%; height: 100%; object-fit: contain; background: #000; }
 /* only the remote cursor (from the video) is shown — no double cursor */
-.session.control .stage, .session.control .stage video { cursor: none; }
+.session.control .stage, .session.control .stage video, .session.control .stage canvas { cursor: none; }
 
 /* Цял екран: лентата се скрива и се показва при приближаване отгоре */
 .session.fs .toolbar { position: absolute; top: 0; left: 0; right: 0; transform: translateY(calc(-100% + 4px)); }
@@ -329,3 +329,7 @@ b { font-weight: 650; }
 }
 .recent li .recent-x:hover { border-color: var(--danger); color: var(--danger); }
 .switch.remember { margin-top: 12px; font-size: 13.5px; }
+
+.diag { max-height: calc(100% - 28px); overflow: hidden; }
+.diag-sec { margin: 8px 0 2px; font-size: 11px; letter-spacing: .8px; text-transform: uppercase; color: var(--gold); opacity: .85; }
+.tag.turbo { border-color: var(--ok); color: var(--ok); }

@@ -30,6 +30,16 @@ agent/    desktop app (Electron)
   pages.yml         publishes web/ to GitHub Pages
 ```
 
+## Video engines
+
+* **GPU (Turbo)** — WebCodecs hardware H.264 encoder on the host (Intel Quick Sync / NVIDIA NVENC / AMD AMF via Media Foundation),
+  fragments sent over an unordered, partially reliable DataChannel, hardware decoding on the viewer, only the newest frame is drawn.
+  Stale frames are dropped instead of queued; a lost frame triggers a keyframe request. Used automatically when the host has a hardware encoder.
+* **Standard (WebRTC)** — fallback; Chromium encodes screen video in software on most Windows machines.
+
+Performance modes: **Automatic** (1080p60, steps down 900p → 720p → 540p on measured drops/congestion and back up when calm),
+**Balanced** (1080p60), **High quality** (up to 1440p60, sharper text), **Max performance** (720p60, lowest latency).
+
 ## Features
 
 * 9-digit ID, one-time password or Accept/Decline prompt

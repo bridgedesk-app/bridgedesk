@@ -151,4 +151,13 @@ function selfTest() {
   return n === 1;
 }
 
-module.exports = { selfTest, foreground, move, moveAbs, button, buttonAbs, wheel, keyEvent, setOnBlocked };
+// a character that has no physical key (IME, injected text): send it as Unicode
+function typeChar(ch) {
+  for (const u of String(ch)) {
+    const code = u.charCodeAt(0);
+    key(0, code, 0x0004 /* KEYEVENTF_UNICODE */);
+    key(0, code, 0x0004 | K.KEYUP);
+  }
+}
+
+module.exports = { selfTest, typeChar, foreground, move, moveAbs, button, buttonAbs, wheel, keyEvent, setOnBlocked };

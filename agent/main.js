@@ -273,6 +273,12 @@ app.whenReady().then(() => app.getGPUInfo('basic').then((g) => {
   const d = g && g.gpuDevice && (g.gpuDevice.find((x) => x.active) || g.gpuDevice[0]);
   if (d) gpuName = (d.driverVendor || '') + ' ' + (d.deviceString || ('0x' + Number(d.deviceId || 0).toString(16)));
 }).catch(() => {}));
+// CPU / memory of all BridgeDesk processes (for the diagnostics panel)
+ipcMain.handle('metrics', () => {
+  let cpu = 0, mem = 0;
+  try { for (const m of app.getAppMetrics()) { cpu += m.cpu.percentCPUUsage || 0; mem += (m.memory && m.memory.workingSetSize) || 0; } } catch { /* */ }
+  return { cpu: Math.round(cpu), memMB: Math.round(mem / 1024) };
+});
 ipcMain.handle('input-diag', () => {
   let gpuEncode = '?';
   try { gpuEncode = app.getGPUFeatureStatus().video_encode || '?'; } catch { /* */ }

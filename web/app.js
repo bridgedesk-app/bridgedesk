@@ -63,13 +63,26 @@
   // older versions kept it in plain text — convert once
   (async () => { const old = store.get('perm', ''); if (old) { await setPerm(old); store.set('perm', null); } })();
 
+  // Performance presets (each one really changes capture size, frame rate, bitrate and encoder hints)
   const QUALITY = {
-    smooth: { maxH: 1080, maxBitrate: 16_000_000, fps: 60, hint: 'motion', pref: 'maintain-framerate' },
-    hq: { maxH: 1080, maxBitrate: 20_000_000, fps: 60, hint: 'detail', pref: 'balanced' },
-    native: { maxH: 0, maxBitrate: 35_000_000, fps: 60, hint: 'detail', pref: 'balanced' },
-    saver: { maxH: 720, maxBitrate: 2_500_000, fps: 30, hint: 'motion', pref: 'balanced' },
+    balanced: { maxH: 1080, maxBitrate: 12_000_000, fps: 60, hint: 'motion', pref: 'maintain-framerate', label: 'Balanced' },
+    hq: { maxH: 1440, maxBitrate: 25_000_000, fps: 60, hint: 'detail', pref: 'balanced', label: 'High quality' },
+    perf: { maxH: 720, maxBitrate: 6_000_000, fps: 60, hint: 'motion', pref: 'maintain-framerate', label: 'Max performance' },
   };
-  const DEFAULT_Q = 'smooth';
+  // Automatic: starts at 1080p and steps down/up this ladder based on measured drops and congestion
+  const AUTO_LADDER = [
+    { maxH: 1080, maxBitrate: 12_000_000, fps: 60 },
+    { maxH: 900, maxBitrate: 8_000_000, fps: 60 },
+    { maxH: 720, maxBitrate: 5_000_000, fps: 60 },
+    { maxH: 540, maxBitrate: 3_000_000, fps: 60 },
+  ].map((x) => Object.assign({ hint: 'motion', pref: 'maintain-framerate', label: 'Auto ' + x.maxH + 'p' }, x));
+  const DEFAULT_Q = 'auto';
+  // older viewers may still send the previous preset names
+  const LEGACY_Q = { smooth: 'balanced', native: 'hq', saver: 'perf' };
+  function presetFor(level) {
+    if (level === 'auto') return AUTO_LADDER[Math.min(host.autoIdx || 0, AUTO_LADDER.length - 1)];
+    return QUALITY[LEGACY_Q[level] || level] || QUALITY.balanced;
+  }
   // Заснемаме направо в 1080p — при 4K монитор това е много по-леко за компютъра (по-малко забавяне)
   const CAPTURE = { video: { frameRate: { ideal: 60, max: 60 }, width: { max: 1920 }, height: { max: 1080 } }, audio: false };
 
@@ -365,9 +378,61 @@
     } catch (e) { console.warn('pump', e); return null; }
   }
 
+  // ---------- GPU engine (host side) ----------
+  const TURBO_SW = /[?&]turboSW=1/.test(location.search);
+  let turboCapPromise = null;
+  function turboCap() {
+    if (!turboCapPromise) {
+      turboCapPromise = (window.BDTurbo && agent ? window.BDTurbo.hardwareEncoder(1920, 1080, TURBO_SW) : Promise.resolve(null))
+        .catch(() => null);
+    }
+    return turboCapPromise;
+  }
+
+  async function startTurbo() {
+    const v = host.viewer; if (!v || v.turbo) return;
+    const cap = await turboCap();
+    const pc = v.conn.peerConnection;
+    if (!cap || !pc || !v.rawTrack) { v.conn.send({ t: 'turbo-no', reason: cap ? 'no-channel' : 'no-hardware-encoder' }); return; }
+    const q = presetFor(host.quality || DEFAULT_Q);
+    v.turbo = window.BDTurbo.createSender({ pc, track: v.rawTrack, codec: cap.codec, hw: cap.hw, quality: { maxH: q.maxH, fps: q.fps, bitrate: q.maxBitrate } });
+    // pause the WebRTC video while the GPU engine runs (saves the CPU it was burning)
+    if (v.rtcSender) v.rtcSender.replaceTrack(null).catch(() => {});
+    v.conn.send({ t: 'turbo-ok', codec: cap.codec, hw: cap.hw });
+  }
+  function stopTurbo() {
+    const v = host.viewer; if (!v || !v.turbo) return;
+    v.turbo.stop(); v.turbo = null;
+    if (v.rtcSender) v.rtcSender.replaceTrack(v.pump ? v.pump.track : v.rawTrack).catch(() => {});
+  }
+
+  // Automatic mode: step the ladder down on measured trouble, back up after a calm period
+  function autoTick() {
+    const v = host.viewer; if (!v || host.quality !== 'auto') return;
+    const now = performance.now();
+    let trouble = false;
+    if (v.turbo) {
+      const t = v.turbo.stats;
+      const drops = t.dropEnc + t.dropNet, prev = v.autoPrevDrops || 0;
+      v.autoPrevDrops = drops;
+      if (drops - prev > 6 || t.buffered > 1_000_000) trouble = true;
+    } else if (v.lastLimit === 'cpu' || v.lastLimit === 'bandwidth') trouble = true;
+    if (v.viewerTrouble) { trouble = true; v.viewerTrouble = false; }
+    if (trouble) {
+      v.calmSince = now;
+      if ((host.autoIdx || 0) < AUTO_LADDER.length - 1 && now - (v.autoChangedAt || 0) > 3000) {
+        host.autoIdx = (host.autoIdx || 0) + 1; v.autoChangedAt = now; applyQuality('auto');
+      }
+    } else if ((host.autoIdx || 0) > 0 && now - (v.calmSince || now) > 12000 && now - (v.autoChangedAt || 0) > 12000) {
+      host.autoIdx -= 1; v.autoChangedAt = now; v.calmSince = now; applyQuality('auto');
+    }
+    if (!v.calmSince) v.calmSince = now;
+  }
+
   async function accept(conn, name) {
     host.viewer = { conn, name, call: null, stream: null };
     host.quality = DEFAULT_Q;
+    host.autoIdx = 0;
     let stream;
     try {
       stream = await getHostStream();
@@ -394,7 +459,7 @@
       return setTimeout(() => conn.close(), 300);
     }
     const track = stream.getVideoTracks()[0];
-    try { track.contentHint = QUALITY[host.quality || DEFAULT_Q].hint; } catch { /* */ }
+    try { track.contentHint = presetFor(host.quality || DEFAULT_Q).hint; } catch { /* */ }
     if (agent) host.viewer.stream = stream;
     // desktop app: send through the frame pump (keeps frames flowing on a static screen)
     let sendStream = stream;
@@ -412,8 +477,10 @@
     let localCursor = false;
     if (agent && agent.hideCursor) { try { localCursor = await agent.hideCursor(); } catch { /* */ } }
 
+    const cap = await turboCap();
     conn.send({
       t: 'ok',
+      turbo: cap ? { codec: cap.codec, hw: cap.hw } : null,
       localCursor,
       control: !!agent,
       name: myName(),
@@ -425,6 +492,8 @@
     const call = host.peer.call(conn.peer, sendStream, { sdpTransform: tuneOffer });
     host.viewer.call = call;
     const pc = call.peerConnection;
+    // keep the video sender itself: its track is swapped (monitor switch, GPU engine on/off)
+    host.viewer.rtcSender = pc && pc.getSenders().find((x) => x.track && x.track.kind === 'video');
     if (pc) {
       pc.addEventListener('connectionstatechange', () => {
         if (pc.connectionState === 'connected') applyQuality(host.quality || DEFAULT_Q);
@@ -432,6 +501,8 @@
       });
     }
     track.addEventListener('ended', () => { if (host.viewer && host.viewer.rawTrack === track) endHostSession(); });
+
+    host.viewer.autoTimer = setInterval(autoTick, 1000);
 
     // диагностика към зрителя на всеки 2 секунди
     if (agent && agent.inputDiag) {
@@ -443,6 +514,15 @@
           const pc = host.viewer.call && host.viewer.call.peerConnection;
           d.codecInfo = codecInfo;
           if (host.viewer.pump) { d.rawFps = host.viewer.pump.stats.rawFps; d.dropped = host.viewer.pump.stats.dropped; }
+          const tv = host.viewer.turbo;
+          if (tv) {
+            const t = tv.stats;
+            d.turbo = { cap: t.fps.cap, enc: t.fps.enc, dropEnc: t.dropEnc, dropNet: t.dropNet, encMs: +tv.encodeLatency().toFixed(1),
+              kbps: t.kbps, buffered: t.buffered || 0, w: t.w, h: t.h, codec: t.codec, hw: t.hw, keyframes: t.keyframes, error: t.error || '' };
+            tv.resetLatency();
+          }
+          d.preset = host.quality === 'auto' ? presetFor('auto').label : (QUALITY[host.quality] || {}).label;
+          if (agent.metrics) { try { d.res = await agent.metrics(); } catch { /* */ } }
           const st = pc ? await pc.getStats() : null;
           if (st) st.forEach((r) => {
             if (r.type === 'outbound-rtp' && r.kind === 'video') {
@@ -451,6 +531,7 @@
               d.hw = r.powerEfficientEncoder;
               d.sendFps = r.framesPerSecond;
               d.limit = r.qualityLimitationReason;
+              host.viewer.lastLimit = r.qualityLimitationReason;
               d.sendRes = r.frameWidth ? r.frameWidth + '×' + r.frameHeight : '';
             }
             if (r.type === 'media-source' && r.kind === 'video') d.capFps = r.framesPerSecond;
@@ -479,9 +560,10 @@
     try { v.conn.send({ t: 'bye' }); } catch { /* */ }
     try { v.call && v.call.close(); } catch { /* */ }
     setTimeout(() => { try { v.conn.close(); } catch { /* */ } }, 200);
+    if (v.turbo) { try { v.turbo.stop(); } catch { /* */ } v.turbo = null; }
     if (v.pump) v.pump.stop();
     if (v.stream) v.stream.getTracks().forEach((t) => t.stop());
-    clearInterval(v.diagTimer);
+    clearInterval(v.diagTimer); clearInterval(v.autoTimer);
     if (agent) { agent.input({ t: 'ka' }); if (agent.restoreCursor) agent.restoreCursor(); agent.sessionState(false); }
     $('#hostActive').hidden = true;
     if (host.peer && host.peer.open) setNet('online', 'Ready to connect');
@@ -490,23 +572,27 @@
   }
 
   function applyQuality(level) {
-    const v = host.viewer; if (!v || !v.call || !v.call.peerConnection) return;
-    if (!QUALITY[level]) level = DEFAULT_Q;
+    const v = host.viewer; if (!v) return;
+    level = LEGACY_Q[level] || level;
+    if (level !== 'auto' && !QUALITY[level]) level = DEFAULT_Q;
+    if (level === 'auto' && host.quality !== 'auto') host.autoIdx = 0;
     host.quality = level;
-    const q = QUALITY[level];
+    const q = presetFor(level);
+    if (v.turbo) v.turbo.setQuality({ maxH: q.maxH, fps: q.fps, bitrate: q.maxBitrate });
+    if (!v.call || !v.call.peerConnection) return;
     const sender = v.call.peerConnection.getSenders().find((s) => s.track && s.track.kind === 'video');
+    // constraints on the capture track apply to both engines
+    const src0 = v.rawTrack;
+    if (src0 && src0.applyConstraints) {
+      src0.applyConstraints({ width: { max: Math.round(q.maxH * 16 / 9) }, height: { max: q.maxH }, frameRate: { max: q.fps } })
+        .catch((e) => console.warn('constraints', e));
+    }
     if (!sender) return;
     const p = sender.getParameters();
     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
     p.encodings[0].maxBitrate = q.maxBitrate;
     // резолюцията се сменя още при заснемането (не само при кодирането)
     const src = v.rawTrack || sender.track;
-    if (src && src.applyConstraints) {
-      const c = q.maxH
-        ? { width: { max: Math.round(q.maxH * 16 / 9) }, height: { max: q.maxH }, frameRate: { max: q.fps } }
-        : { frameRate: { max: q.fps } }; // без ограничение = оригиналната резолюция
-      src.applyConstraints(c).catch((e) => console.warn('constraints', e));
-    }
     const h = (src && src.getSettings().height) || 1080;
     p.encodings[0].scaleResolutionDownBy = q.maxH && h > q.maxH * 1.05 ? h / q.maxH : 1;
     p.encodings[0].maxFramerate = q.fps;
@@ -522,12 +608,13 @@
     await agent.selectScreen(host.screens[idx].id);
     const s = await captureScreen(host.screens[idx].id);
     const track = s.getVideoTracks()[0];
-    try { track.contentHint = QUALITY[host.quality || DEFAULT_Q].hint; } catch { /* */ }
+    try { track.contentHint = presetFor(host.quality || DEFAULT_Q).hint; } catch { /* */ }
     const pump = makePump(track);
     if (pump) { try { pump.track.contentHint = track.contentHint; } catch { /* */ } }
-    const sender = v.call.peerConnection.getSenders().find((x) => x.track && x.track.kind === 'video');
     const oldPump = v.pump, oldStream = v.stream;
-    await sender.replaceTrack(pump ? pump.track : track);
+    // GPU engine: just swap its capture source; WebRTC sender stays paused
+    if (v.turbo) v.turbo.setTrack(track);
+    else if (v.rtcSender) await v.rtcSender.replaceTrack(pump ? pump.track : track);
     v.pump = pump; v.rawTrack = track; v.stream = s;
     if (oldPump) oldPump.stop();
     if (oldStream) oldStream.getTracks().forEach((t) => t.stop());
@@ -544,8 +631,11 @@
         host.switching = (host.switching || Promise.resolve()).then(() => switchScreen(Number(msg.i))).catch(console.error);
         return;
       case 'bye': endHostSession(); return;
+      case 'turbo': if (msg.on) startTurbo().catch(console.error); else stopTurbo(); return;
+      case 'kf': if (host.viewer && host.viewer.turbo) host.viewer.turbo.requestKey(); return;
+      case 'vstat': if (host.viewer && msg.trouble) host.viewer.viewerTrouble = true; return;
       case 'clip': if (agent) agent.setClipboard(String(msg.text || '').slice(0, 100_000)); return;
-      case 'mm': case 'md': case 'mu': case 'wh': case 'kd': case 'ku': case 'kt': case 'ka':
+      case 'mm': case 'md': case 'mu': case 'wh': case 'kd': case 'ku': case 'kt': case 'ka': case 'ch':
         if (agent) agent.input(msg);
         return;
       default:
@@ -614,6 +704,8 @@
         view.remapMeta = IS_MAC && view.hostPlatform && view.hostPlatform !== 'darwin';
         view.remapCtrl = !IS_MAC && view.hostPlatform === 'darwin';
         view.hostName = msg.name || 'Computer';
+        view.hostTurbo = msg.turbo || null;
+        maybeStartTurbo();
         setupScreens(msg.screens || [], msg.screen || 0);
         saveRecent(view.id, view.hostName);
         if (view.remember && view.pass && !view.usedSaved) savePass(view.id, view.pass);
@@ -645,6 +737,11 @@
       }
       case 'clipboard': setLocalClipboard(String(msg.text || '')); return;
       case 'diag': renderDiag(msg.d); return;
+      case 'turbo-ok': view.turboHostHw = !!msg.hw; return;
+      case 'turbo-no':
+        stopTurboView(false);
+        if (view.enginePref === 'turbo') toast('GPU engine not available on the remote computer (' + (msg.reason || '?') + ') — using Standard.', true);
+        return;
       case 'screen-ok': toast('Showing screen ' + (Number(msg.i) + 1)); return;
       case 'cur': if (view.localCursor) setViewCursor(String(msg.s || 'default')); return;
       case 'warn':
@@ -702,7 +799,7 @@
   const CURSORS = new Set(['default', 'text', 'wait', 'crosshair', 'nwse-resize', 'nesw-resize', 'ew-resize', 'ns-resize', 'move', 'not-allowed', 'pointer', 'progress', 'help', 'none']);
   function setViewCursor(c) {
     const v = CURSORS.has(c) ? c : 'default';
-    stage.style.cursor = v; video.style.cursor = v;
+    stage.style.cursor = v; video.style.cursor = v; if (canvasEl) canvasEl.style.cursor = v;
   }
 
   // --- панел „Диагностика“ ---
@@ -711,23 +808,136 @@
     view.lastDiag = d;
     const s = (k) => sentStats[k] || 0;
     const fg = d.foreground;
-    const rows = [
-      ['Remote input mode', d.mode + (d.isAdmin ? ' · administrator' : ' · standard user')],
-      ['Windows capture fps', d.rawFps != null ? d.rawFps + (d.dropped ? ' (dropped ' + d.dropped + ')' : '') : '–'],
-      ['Remote encoded / sent fps', (d.capFps != null ? Math.round(d.capFps) : '–') + ' / ' + (d.sendFps != null ? Math.round(d.sendFps) : '–')],
-      ['Your decoder', view.decoder || '–'],
-      ['Remote encoder', (d.codec ? d.codec + ' · ' : '') + (d.enc || '–') + (d.hw === true ? ' · hardware' : d.hw === false ? ' · software' : '') + (d.sendRes ? ' · ' + d.sendRes : '')],
-      ['Remote GPU / HW encode', (d.gpuName || '?') + ' · ' + (d.gpuEncode || '?')],
-      ['Remote codec check', d.codecInfo || '–'],
-      ['Quality limited by', d.limit && d.limit !== 'none' ? d.limit.toUpperCase() : 'nothing'],
-      ['Moves (sent / received)', s('mm') + ' / ' + d.mm],
-      ['Clicks (sent / received)', (s('md') + s('mu')) + ' / ' + (d.md + d.mu)],
-      ['Keys (sent / received)', (s('kd') + s('ku')) + ' / ' + (d.kd + d.ku)],
-      ['Remote active window', fg ? (fg.name + (fg.elevated ? ' ⚠ administrator' : '')) : '—'],
-      ['Blocked by Windows', String(d.sendFail || 0)],
-      ['Errors', d.errors ? d.errors + ' — ' + d.lastError : '0'],
-    ];
-    el.innerHTML = '<b>Diagnostics</b>' + rows.map((r) => '<div class="diag-row"><span>' + r[0] + '</span><em>' + String(r[1]).replace(/[<>&]/g, '') + '</em></div>').join('');
+    const n = view.net || {};
+    const r = view.receiver && view.turboActive ? view.receiver.stats : null;
+    const t = d.turbo;
+    const ms = (x) => (x == null || isNaN(x) ? '–' : x + ' ms');
+    const rows = [];
+    const sec = (title) => rows.push([title]);
+    const row = (a, b) => rows.push([a, b == null ? '–' : b]);
+
+    sec('Engine');
+    row('Video engine', r ? 'GPU (WebCodecs) · ' + (t && t.hw ? 'hardware encode' : 'software encode') + ' · ' + (r.hw ? 'hardware decode' : 'software decode')
+      : 'Standard (WebRTC)' + (view.receiver ? ' · GPU starting…' : ''));
+    row('Mode', d.preset || '–');
+    row('GPU engine on remote', view.hostTurbo ? (view.hostTurbo.hw ? 'available · ' + view.hostTurbo.codec : 'software only') : 'not available');
+
+    sec('Pipeline (capture → encode → network → decode → display)');
+    if (r && t) {
+      row('Capture fps (Windows)', t.cap);
+      row('Encoded fps · encode time', t.enc + ' · ' + ms(t.encMs));
+      row('Encoder', (t.codec || '') + ' · ' + (t.w ? t.w + '×' + t.h : '') + ' · ' + (t.hw ? 'hardware' : 'software'));
+      row('Received / decoded / displayed fps', r.fps.recv + ' / ' + r.fps.dec + ' / ' + r.fps.disp);
+      row('Decode time', ms(+view.receiver.decodeLatency().toFixed(1)));
+      row('1% low fps · frame time p50 / p99', (r.low1 || '–') + ' · ' + (r.p50 || '–') + ' / ' + (r.p99 || '–') + ' ms');
+      row('Dropped: encoder / network / lost', t.dropEnc + ' / ' + t.dropNet + ' / ' + r.lost);
+      row('Freezes (>400 ms) · keyframe requests', r.freezes + ' · ' + r.keyReq);
+      if (t.error || r.error) row('Engine error', (t.error || '') + ' ' + (r.error || ''));
+      view.receiver.resetLatency();
+    } else {
+      row('Capture fps (Windows)', d.rawFps != null ? d.rawFps + (d.dropped ? ' (pump dropped ' + d.dropped + ')' : '') : '–');
+      row('Encoded / sent fps', (d.capFps != null ? Math.round(d.capFps) : '–') + ' / ' + (d.sendFps != null ? Math.round(d.sendFps) : '–'));
+      row('Encoder', (d.codec ? d.codec + ' · ' : '') + (d.enc || '–') + (d.hw === true ? ' · hardware' : d.hw === false ? ' · software' : '') + (d.sendRes ? ' · ' + d.sendRes : ''));
+      row('Decoded / displayed fps', (n.decFps != null ? Math.round(n.decFps) : '–') + ' / ' + presented.fps);
+      row('Decoder · decode time', (view.decoder || '–') + ' · ' + ms(n.decMs));
+      row('1% low fps · frame time p99', (presented.low1 || '–') + ' · ' + ms(presented.p99));
+      row('Jitter buffer', ms(n.jbMs));
+      row('Frames dropped · freezes', (n.dropped != null ? n.dropped : '–') + ' · ' + (n.freezes != null ? n.freezes + ' (' + (n.freezeSec || 0).toFixed(1) + ' s)' : '–'));
+      row('Quality limited by', d.limit && d.limit !== 'none' ? d.limit.toUpperCase() : 'nothing');
+    }
+
+    sec('Network');
+    row('Route · RTT', ($('#stRoute').textContent || '–') + ' · ' + ms(n.rtt != null ? n.rtt : +$('#stPing').textContent || null));
+    if (r && t) row('Bitrate · send queue', (t.kbps / 1000).toFixed(1) + ' Mbps · ' + Math.round((t.buffered || 0) / 1024) + ' KB');
+    else row('Jitter · packets lost', ms(n.jitter) + ' · ' + (n.lost != null ? n.lost + ' / ' + (n.recvPk || 0) : '–'));
+
+    sec('Remote computer');
+    row('GPU', (d.gpuName || '?') + ' · video encode ' + (d.gpuEncode || '?'));
+    if (d.res) row('BridgeDesk CPU · memory', d.res.cpu + ' % · ' + d.res.memMB + ' MB');
+    row('Input mode', d.mode + (d.isAdmin ? ' · administrator' : ' · standard user'));
+    row('Active window', fg ? (fg.name + (fg.elevated ? ' ⚠ administrator' : '')) : '—');
+
+    sec('Input');
+    row('Moves · clicks · keys (sent / received)', s('mm') + '/' + d.mm + ' · ' + (s('md') + s('mu')) + '/' + (d.md + d.mu) + ' · ' + (s('kd') + s('ku')) + '/' + (d.kd + d.ku));
+    row('Blocked by Windows · errors', (d.sendFail || 0) + ' · ' + (d.errors ? d.errors + ' — ' + d.lastError : '0'));
+
+    const esc = (x) => String(x).replace(/[<>&]/g, '');
+    el.innerHTML = '<b>Diagnostics</b>' + rows.map((x) => (x.length === 1
+      ? '<div class="diag-sec">' + esc(x[0]) + '</div>'
+      : '<div class="diag-row"><span>' + esc(x[0]) + '</span><em>' + esc(x[1]) + '</em></div>')).join('');
+  }
+
+
+  // ---------- GPU engine (viewer side) ----------
+  const canvasEl = $('#turboCanvas');
+  view.enginePref = store.get('engine', 'auto');
+  async function maybeStartTurbo() {
+    if (view.receiver || view.enginePref === 'standard') return;
+    const ht = view.hostTurbo;
+    if (!ht || !window.BDTurbo || !window.BDTurbo.SUPPORTED) {
+      if (view.enginePref === 'turbo') toast(ht ? 'This computer cannot decode the GPU stream — using Standard.' : 'The remote computer has no hardware encoder for the GPU engine — using Standard.', true);
+      return;
+    }
+    // Auto only uses the GPU engine when the host really encodes in hardware
+    if (view.enginePref === 'auto' && !ht.hw) return;
+    const dec = await window.BDTurbo.hardwareDecoder(ht.codec);
+    const pc = view.conn && view.conn.peerConnection;
+    if (!dec || !pc || view.ended) return;
+    view.receiver = window.BDTurbo.createReceiver({ pc, canvas: canvasEl, codec: ht.codec, onKeyRequest: () => send({ t: 'kf' }) });
+    view.turboStartedAt = performance.now();
+    view.turboPrevLost = 0;
+    send({ t: 'turbo', on: true });
+  }
+  function activateTurboView() {
+    view.turboActive = true;
+    canvasEl.hidden = false; video.hidden = true;
+    const tag = $('#sesMode'); tag.textContent = 'control · GPU'; tag.className = 'tag control turbo';
+    setViewCursor(stage.style.cursor || (view.localCursor ? 'default' : 'none'));
+  }
+  function stopTurboView(sendOff) {
+    if (view.receiver) { try { view.receiver.stop(); } catch { /* */ } view.receiver = null; }
+    const was = view.turboActive;
+    view.turboActive = false;
+    canvasEl.hidden = true; video.hidden = false;
+    if (view.control) { const tag = $('#sesMode'); tag.textContent = 'control'; tag.className = 'tag control'; }
+    if (sendOff && view.conn && view.conn.open) send({ t: 'turbo', on: false });
+    return was;
+  }
+  // called every second from the stats loop
+  function turboWatch() {
+    const r = view.receiver; if (!r) return;
+    const t = r.stats;
+    if (!view.turboActive && t.displayed > 0) activateTurboView();
+    // no picture after 6 s → fall back to the standard engine automatically
+    if (!view.turboActive && performance.now() - view.turboStartedAt > 6000) {
+      stopTurboView(true);
+      toast('GPU engine did not start — switched back to Standard.', true);
+      return;
+    }
+    // tell the host when frames are being lost (Automatic mode steps down)
+    if (t.lost - view.turboPrevLost > 2) send({ t: 'vstat', trouble: true });
+    view.turboPrevLost = t.lost;
+  }
+
+  // displayed-frame counter for the standard engine (requestVideoFrameCallback = real presented frames)
+  const presented = { n: 0, fps: 0, intervals: [], last: 0, low1: 0, p99: 0, t: performance.now() };
+  function trackPresented() {
+    if (!video.requestVideoFrameCallback) return;
+    const cb = (now) => {
+      if (presented.last) { presented.intervals.push(now - presented.last); if (presented.intervals.length > 300) presented.intervals.shift(); }
+      presented.last = now; presented.n++;
+      if (!view.ended) video.requestVideoFrameCallback(cb);
+    };
+    video.requestVideoFrameCallback(cb);
+  }
+  function presentedTick() {
+    const now = performance.now(), dt = (now - presented.t) / 1000;
+    presented.fps = Math.round(presented.n / dt); presented.n = 0; presented.t = now;
+    if (presented.intervals.length > 20) {
+      const s = [...presented.intervals].sort((a, b) => a - b);
+      presented.p99 = Math.round(s[Math.floor(s.length * 0.99) - 1] || s[s.length - 1]);
+      presented.low1 = Math.round(1000 / presented.p99);
+    }
   }
 
   function showConnecting(title, text) {
@@ -755,6 +965,7 @@
     tag.className = 'tag' + (view.control ? ' control' : '');
     $('#selQuality').value = DEFAULT_Q;
     $('#stage').focus();
+    trackPresented();
     startStats();
     if (agent) agent.sessionState(true, 'view');
   }
@@ -773,6 +984,7 @@
     clearTimeout(view.timeout);
     releaseAllKeys();
     try { view.conn && view.conn.open && view.conn.send({ t: 'bye' }); } catch { /* */ }
+    stopTurboView(false);
     try { view.call && view.call.close(); } catch { /* */ }
     try { view.peer && view.peer.destroy(); } catch { /* */ }
     view.peer = view.conn = view.call = null;
@@ -793,16 +1005,33 @@
     let lastBytes = 0, lastTs = 0;
     clearInterval(view.stats); clearInterval(view.ping);
     view.ping = setInterval(() => { try { view.conn.send({ t: 'ping', ts: performance.now() }); } catch { /* */ } }, 2000);
+    view.net = {};
     view.stats = setInterval(async () => {
+      presentedTick();
+      turboWatch();
       const pc = view.call && view.call.peerConnection; if (!pc) return;
       const rep = await pc.getStats();
       let pairId = null;
+      if (view.turboActive && view.receiver) {
+        const t = view.receiver.stats;
+        $('#stFps').textContent = t.fps.disp;
+        if (t.w) $('#stRes').textContent = t.w + '×' + t.h;
+        $('#stRate').textContent = (t.kbps / 1000).toFixed(1);
+      }
       rep.forEach((r) => {
-        if (r.type === 'inbound-rtp' && r.kind === 'video') {
-          if (r.framesPerSecond != null) $('#stFps').textContent = Math.round(r.framesPerSecond);
+        if (r.type === 'inbound-rtp' && r.kind === 'video' && !view.turboActive) {
+          const n = view.net;
+          n.jitter = r.jitter != null ? Math.round(r.jitter * 1000) : null;
+          n.lost = r.packetsLost; n.recvPk = r.packetsReceived;
+          n.freezes = r.freezeCount; n.freezeSec = r.totalFreezesDuration;
+          n.dropped = r.framesDropped;
+          if (r.jitterBufferEmittedCount) n.jbMs = Math.round(r.jitterBufferDelay / r.jitterBufferEmittedCount * 1000);
+          if (r.framesDecoded) n.decMs = +(r.totalDecodeTime / r.framesDecoded * 1000).toFixed(1);
+          n.decFps = r.framesPerSecond;
+          $('#stFps').textContent = presented.fps || (r.framesPerSecond != null ? Math.round(r.framesPerSecond) : '–');
           if (r.frameHeight) $('#stRes').textContent = r.frameWidth + '×' + r.frameHeight;
           if (r.decoderImplementation) view.decoder = r.decoderImplementation + (r.powerEfficientDecoder ? ' · hardware' : r.powerEfficientDecoder === false ? ' · software' : '');
-          if (lastTs) $('#stRate').textContent = (((r.bytesReceived - lastBytes) * 8) / ((r.timestamp - lastTs) * 1000)).toFixed(1);
+          if (lastTs && !view.turboActive) $('#stRate').textContent = (((r.bytesReceived - lastBytes) * 8) / ((r.timestamp - lastTs) * 1000)).toFixed(1);
           lastBytes = r.bytesReceived; lastTs = r.timestamp;
         }
         if (r.type === 'transport' && r.selectedCandidatePairId) pairId = r.selectedCandidatePairId;
@@ -810,6 +1039,7 @@
       });
       if (pairId) {
         const pair = rep.get(pairId); const lc = pair && rep.get(pair.localCandidateId);
+        if (pair && pair.currentRoundTripTime != null) view.net.rtt = Math.round(pair.currentRoundTripTime * 1000);
         if (lc) $('#stRoute').textContent = lc.candidateType === 'relay' ? 'via TURN' : 'direct';
       }
     }, 1000);
@@ -819,8 +1049,9 @@
   const stage = $('#stage');
   const video = $('#remote');
   function norm(e) {
-    const r = video.getBoundingClientRect();
-    const vw = video.videoWidth, vh = video.videoHeight;
+    const el = view.turboActive ? canvasEl : video;
+    const r = el.getBoundingClientRect();
+    const vw = view.turboActive ? canvasEl.width : video.videoWidth, vh = view.turboActive ? canvasEl.height : video.videoHeight;
     if (!vw || !vh) return null;
     const sc = Math.min(r.width / vw, r.height / vh);
     const cw = vw * sc, ch = vh * sc;
@@ -877,6 +1108,7 @@
     if (!canSend() || !$('#ovSettings').hidden) return;
     if (e.target && e.target.tagName === 'SELECT') return;
     e.preventDefault();
+    if (!e.code) { if (e.key && e.key.length === 1) sendKey({ t: 'ch', s: e.key }); return; }
     const c = mapCode(e.code);
     if (e.repeat && view.held.has(c)) { sendKey({ t: 'kd', c, r: 1 }); return; }
     view.held.add(c);
@@ -894,6 +1126,7 @@
   window.addEventListener('keyup', (e) => {
     if (!canSend()) return;
     e.preventDefault();
+    if (!e.code) return;
     const c = mapCode(e.code);
     view.held.delete(c);
     sendKey({ t: 'ku', c });
@@ -908,6 +1141,13 @@
   // --- лента с инструменти ---
   $('#btnDiag').onclick = () => { $('#diagPanel').hidden = !$('#diagPanel').hidden; stage.focus(); };
   $('#btnHang').onclick = () => endView('The session ended');
+  $('#selEngine').value = view.enginePref;
+  $('#selEngine').onchange = (e) => {
+    view.enginePref = e.target.value; store.set('engine', view.enginePref);
+    if (view.enginePref === 'standard') { if (stopTurboView(true)) toast('Standard engine'); }
+    else maybeStartTurbo();
+    stage.focus();
+  };
   $('#selQuality').onchange = (e) => { send({ t: 'q', v: e.target.value }); stage.focus(); };
   $('#selScreen').onchange = (e) => { send({ t: 'screen', i: Number(e.target.value) }); toast('Switching to screen ' + (Number(e.target.value) + 1) + '…'); stage.focus(); };
   $('#btnWin').onclick = () => { send({ t: 'kt', keys: ['MetaLeft'] }); stage.focus(); };

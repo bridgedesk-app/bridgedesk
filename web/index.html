@@ -153,11 +153,16 @@
       </div>
       <div class="tb-right">
         <button id="btnUpdate" class="update-pill" type="button" hidden>↑ Update ready</button>
-        <select id="selQuality" class="select" title="Quality">
-          <option value="smooth" selected>Smooth · 1080p 60</option>
-          <option value="hq">Sharp text · 1080p</option>
-          <option value="native">Native resolution (heavier)</option>
-          <option value="saver">Low bandwidth · 720p</option>
+        <select id="selEngine" class="select" title="Video engine">
+          <option value="auto" selected>Engine: Auto</option>
+          <option value="turbo">Engine: GPU (Turbo)</option>
+          <option value="standard">Engine: Standard</option>
+        </select>
+        <select id="selQuality" class="select" title="Performance mode">
+          <option value="auto" selected>Automatic</option>
+          <option value="balanced">Balanced · 1080p 60</option>
+          <option value="hq">High quality · up to 1440p</option>
+          <option value="perf">Max performance · 720p 60</option>
         </select>
         <select id="selScreen" class="select" title="Screen" hidden></select>
         <button class="tb-btn ctl" id="btnClip" title="Send clipboard to remote (copy/paste also syncs automatically)">
@@ -178,6 +183,7 @@
     </div>
     <div class="stage" id="stage" tabindex="0">
       <video id="remote" autoplay playsinline muted disablepictureinpicture></video>
+      <canvas id="turboCanvas" hidden></canvas>
       <div id="diagPanel" class="diag" hidden><b>Diagnostics</b><div class="diag-row"><span>Waiting for data from the remote computer…</span></div></div>
     </div>
   </section>
@@ -242,6 +248,7 @@
 
 <script src="config.js"></script>
 <script src="vendor/peerjs.min.js"></script>
+<script src="turbo.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -111,6 +111,7 @@ async function runNut(msg) {
       if (msg.dx < 0) await n.mouse.scrollLeft(wheelAmount(msg.dx));
       break;
     case 'kd': { const k = keyOf(msg.c); if (k !== null) await n.keyboard.pressKey(k); break; }
+    case 'ch': await n.keyboard.type(String(msg.s || '').slice(0, 8)); break;
     case 'ku': { const k = keyOf(msg.c); if (k !== null) await n.keyboard.releaseKey(k); break; }
     default:
   }
@@ -124,6 +125,7 @@ function runWin(msg) {
     case 'mu': win.buttonAbs(msg.b, false, typeof msg.x === 'number' ? toAbs(msg.x, msg.y) : null); break;
     case 'wh': win.wheel(msg.dx || 0, msg.dy || 0); break;
     case 'kd': win.keyEvent(msg.c, true); break;
+    case 'ch': win.typeChar(String(msg.s || '').slice(0, 8)); break;
     case 'ku': win.keyEvent(msg.c, false); break;
     default:
   }
