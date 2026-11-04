@@ -1,9 +1,9 @@
 name: Release desktop app
 
 # How to publish an update:
-#   change "version" in agent/package.json (e.g. 0.3.1 -> 0.3.2) and commit to main.
-#   This workflow builds Windows + macOS, publishes GitHub release v<version>,
-#   and every installed BridgeDesk updates itself.
+#   change "version" in agent/package.json (e.g. 0.4.2 -> 0.4.3) and commit to main.
+#   Windows is built and PUBLISHED first (installed apps update themselves).
+#   macOS is built afterwards and attached to the same release (its runners are often queued for a long time).
 on:
   push:
     branches: [main]
@@ -36,21 +36,16 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  windows:
     needs: prepare
     if: needs.prepare.outputs.skip != 'true'
-    strategy:
-      fail-fast: false            # a slow/failed macOS runner must not block the Windows release
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     timeout-minutes: 40
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     defaults:
       run:
         working-directory: agent
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # no paid code signing yet
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -61,15 +56,36 @@ jobs:
           cache-dependency-path: agent/package-lock.json
       - run: npm ci
       - name: Build and upload to the draft release
-        run: npm run release
+        run: npm run release -- --win
 
   publish:
-    needs: [prepare, build]
-    # publish as soon as the builds finished; macOS is optional (continue-on-error above)
-    if: always() && needs.prepare.outputs.skip != 'true' && needs.build.result != 'cancelled'
+    needs: [prepare, windows]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Publish the release (installed apps will now update)
+      - name: Publish the release (installed Windows apps will now update)
         run: gh release edit "v${{ needs.prepare.outputs.version }}" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+
+  macos:
+    needs: [prepare, publish]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: agent
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent/package-lock.json
+      - run: npm ci
+      - name: Build macOS
+        run: npm run dist:mac
+      - name: Attach to the published release
+        run: gh release upload "v${{ needs.prepare.outputs.version }}" dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml --clobber --repo "$GITHUB_REPOSITORY"
