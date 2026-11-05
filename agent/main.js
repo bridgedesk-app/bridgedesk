@@ -84,9 +84,13 @@ app.commandLine.appendSwitch('enable-features', 'MediaFoundationH264CbpEncoding'
 // zero frames (measured: black screen, 0 fps). H.264 is the proven path.
 app.commandLine.appendSwitch('disable-features', 'WebRtcAllowH265Send,WebRtcAllowH265Receive');
 
-// Съвместим режим на заснемане: без Windows Graphics Capture (ползва DXGI/GDI)
-const captureCompat = readSettings().captureCompat === true;
-if (process.platform === 'win32' && captureCompat) {
+// Screen capture backend on Windows. Default: DXGI Desktop Duplication (with GDI fallback), the same
+// approach AnyDesk/RustDesk use. Windows Graphics Capture (WGC) was the cause of sessions where the
+// first connection worked and every later one got zero frames (black screen) until BridgeDesk restarted.
+// WGC can still be switched on with "captureWgc": true in the settings file.
+const useWgc = readSettings().captureWgc === true;
+const captureCompat = !useWgc;
+if (process.platform === 'win32' && !useWgc) {
   app.commandLine.appendSwitch('disable-features', 'WebRtcAllowH265Send,WebRtcAllowH265Receive,AllowWgcScreenCapturer,AllowWgcWindowCapturer,AllowWgcZeroHz');
 }
 
@@ -350,7 +354,8 @@ ipcMain.on('set-admin', (_e, on) => { writeSettings({ admin: !!on }); });
 // Самопоправка при неуспешно заснемане: сменяме режима и стартираме отново (без администратор)
 ipcMain.on('recover', (_e, kind) => {
   if (kind === 'admin') writeSettings({ admin: false });
-  if (kind === 'compat') writeSettings({ captureCompat: true });
+  if (kind === 'compat') writeSettings({ captureCompat: true, captureWgc: false });
+  // kind 'restart': plain restart that clears a stuck capture session
   quitting = true;
   app.releaseSingleInstanceLock();
   if (process.platform === 'win32' && isAdmin && app.isPackaged) {

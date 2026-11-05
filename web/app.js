@@ -339,6 +339,29 @@
     return captureScreen(host.screens[host.screenIdx].id);
   }
 
+  // resolves true as soon as the capture delivers its first frame
+  function waitFirstFrame(pump, track, ms) {
+    return new Promise((resolve) => {
+      if (!track || track.readyState !== 'live') return resolve(false);
+      const t0 = performance.now();
+      if (pump) {
+        const iv = setInterval(() => {
+          if (pump.stats.total > 0) { clearInterval(iv); resolve(true); }
+          else if (performance.now() - t0 > ms || track.readyState !== 'live') { clearInterval(iv); resolve(false); }
+        }, 50);
+        return;
+      }
+      const vid = document.createElement('video');
+      vid.muted = true; vid.srcObject = new MediaStream([track]);
+      let done = false;
+      const fin = (r) => { if (done) return; done = true; try { vid.pause(); vid.srcObject = null; } catch { /* */ } resolve(r); };
+      if (vid.requestVideoFrameCallback) vid.requestVideoFrameCallback(() => fin(true));
+      vid.addEventListener('loadeddata', () => { if (!vid.requestVideoFrameCallback) fin(true); });
+      vid.play().catch(() => {});
+      setTimeout(() => fin(false), ms);
+    });
+  }
+
   // ---------- Frame pump ----------
   // Windows only delivers a new captured frame when something on the screen changes. With a static
   // screen (and the remote cursor hidden) no frames arrive at all: the viewer stays black after
@@ -352,7 +375,7 @@
       const reader = proc.readable.getReader();
       const writer = gen.writable.getWriter();
       let last = null, lastAt = 0, pending = 0, stopped = false;
-      const stats = { raw: 0, rawFps: 0, dropped: 0, t0: performance.now() };
+      const stats = { raw: 0, rawFps: 0, dropped: 0, total: 0, t0: performance.now() };
       const write = async (frame) => {
         pending++;
         try { await writer.write(frame); } catch { try { frame.close(); } catch { /* */ } }
@@ -364,7 +387,7 @@
           try { r = await reader.read(); } catch { break; }
           if (r.done) break;
           const f = r.value;
-          stats.raw++;
+          stats.raw++; stats.total++;
           const now = performance.now();
           if (now - stats.t0 >= 1000) { stats.rawFps = Math.round(stats.raw * 1000 / (now - stats.t0)); stats.raw = 0; stats.t0 = now; }
           if (last) last.close();
@@ -393,7 +416,7 @@
           try { track.stop(); } catch { /* */ }
         },
       };
-    } catch (e) { console.warn('pump', e); return null; }
+    } catch (e) { console.warn('pump', e); host.pumpError = String((e && e.message) || e).slice(0, 80); return null; }
   }
 
   // ---------- GPU engine (host side) ----------
@@ -502,19 +525,49 @@
       host.viewer = null;
       return setTimeout(() => conn.close(), 300);
     }
-    const track = stream.getVideoTracks()[0];
+    // Capture health check (AnyDesk-style): the picture must actually produce frames. If the capture
+    // gives a live track that never delivers a frame (stuck Windows capture session), capture again;
+    // if that also stays empty, restart BridgeDesk on this computer — the viewer reconnects by itself.
+    let track = stream.getVideoTracks()[0];
+    let pump = agent ? makePump(track) : null;
+    if (agent) {
+      let healthy = await waitFirstFrame(pump, track, 3000);
+      host.capHealth = healthy ? 'ok' : 'no frames (retrying)';
+      if (!healthy && host.viewer && host.viewer.conn === conn) {
+        if (pump) pump.stop();
+        stream.getTracks().forEach((t) => t.stop());
+        await new Promise((r) => setTimeout(r, 400));
+        try { stream = await getHostStream(); } catch (e) { stream = null; }
+        track = stream && stream.getVideoTracks()[0];
+        pump = track ? makePump(track) : null;
+        healthy = track ? await waitFirstFrame(pump, track, 3000) : false;
+        host.capHealth = healthy ? 'ok (after re-capture)' : 'no frames';
+      }
+      if (!host.viewer || host.viewer.conn !== conn) { if (pump) pump.stop(); if (stream) stream.getTracks().forEach((t) => t.stop()); return; }
+      const lastRestart = +(store.get('capRestartAt') || 0);
+      if (!healthy && agent.recover && Date.now() - lastRestart > 180000) {
+        if (pump) pump.stop();
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+        store.set('capRestartAt', Date.now());
+        store.set('keepPass', { pass: host.pass, at: Date.now() });
+        conn.send({ t: 'deny', reason: 'restarting', detail: 'no-frames' });
+        host.viewer = null;
+        $('#hostNote').className = 'note warn';
+        $('#hostNote').textContent = 'Screen capture stopped delivering frames — restarting BridgeDesk…';
+        setTimeout(() => { try { conn.close(); } catch { /* */ } agent.recover('restart'); }, 500);
+        return;
+      }
+      if (!stream) { conn.send({ t: 'deny', reason: 'capture', detail: 'no-frames' }); host.viewer = null; return setTimeout(() => conn.close(), 300); }
+    }
     try { track.contentHint = presetFor(host.quality || DEFAULT_Q).hint; } catch { /* */ }
     if (agent) host.viewer.stream = stream;
     // desktop app: send through the frame pump (keeps frames flowing on a static screen)
     let sendStream = stream;
     host.viewer.rawTrack = track;
-    if (agent) {
-      const pump = makePump(track);
-      if (pump) {
-        host.viewer.pump = pump;
-        try { pump.track.contentHint = track.contentHint; } catch { /* */ }
-        sendStream = new MediaStream([pump.track]);
-      }
+    if (pump) {
+      host.viewer.pump = pump;
+      try { pump.track.contentHint = track.contentHint; } catch { /* */ }
+      sendStream = new MediaStream([pump.track]);
     }
 
     // Windows: hide the cursor in the captured picture; the viewer draws a local, instant cursor
@@ -548,6 +601,10 @@
         try {
           const pc = host.viewer.call && host.viewer.call.peerConnection;
           d.codecInfo = codecInfo;
+          d.capHealth = host.capHealth; d.pumpErr = host.pumpError || '';
+          d.capFrames = host.viewer.pump ? host.viewer.pump.stats.total : null;
+          d.capBackend = agent.platform === 'win32' ? (agent.captureCompat ? 'DXGI' : 'WGC') : '';
+          try { const rt = host.viewer.rawTrack; d.trackState = rt ? rt.readyState + (rt.muted ? ' · muted' : '') : 'none'; } catch { /* */ }
           if (host.viewer.pump) { d.rawFps = host.viewer.pump.stats.rawFps; d.dropped = host.viewer.pump.stats.dropped; }
           const tv = host.viewer.turbo;
           if (tv) {
@@ -777,7 +834,7 @@
         if (msg.reason === 'restarting' && !view.autoRetried) {
           const id = view.id, pass = view.pass;
           view.ended = false; endView(null);
-          showConnecting('Remote side is restarting', 'BridgeDesk on the other computer is switching to compatibility mode. Reconnecting in a few seconds…');
+          showConnecting('Remote side is restarting', 'BridgeDesk on the other computer is restarting its screen capture. Reconnecting in a few seconds…');
           view.retryTimer = setTimeout(() => { connect(id, pass, true); }, 14000);
           $('#ovConnecting').hidden = false;
           return;
@@ -792,7 +849,7 @@
           busy: 'The computer is already in another session.',
           locked: 'Too many wrong attempts. Try again in a minute.',
           capture: 'The remote computer could not capture its screen' + (msg.detail ? ' (' + msg.detail + ')' : '') + '.',
-          restarting: 'BridgeDesk on the remote computer is restarting in compatibility mode. Reconnecting automatically…',
+          restarting: 'BridgeDesk on the remote computer is restarting its screen capture. Reconnecting automatically…',
           'locked-screen': 'The remote computer is locked. Unlock it (sign in to Windows) and try again.',
           noscreen: 'No screen found on the remote computer — is the monitor off or is it in a Remote Desktop session?',
         }[msg.reason] || 'The connection was refused.';
@@ -902,6 +959,7 @@
       view.receiver.resetLatency();
     } else {
       row('Capture fps (Windows)', d.rawFps != null ? d.rawFps + (d.dropped ? ' (pump dropped ' + d.dropped + ')' : '') : '–');
+      row('Capture · health', [d.capBackend, d.trackState, d.capHealth, d.capFrames != null ? d.capFrames + ' frames' : (d.pumpErr ? 'pump: ' + d.pumpErr : 'no pump')].filter(Boolean).join(' · ') || '–');
       row('Encoded / sent fps', (d.capFps != null ? Math.round(d.capFps) : '–') + ' / ' + (d.sendFps != null ? Math.round(d.sendFps) : '–'));
       row('Encoder', (d.codec ? d.codec + ' · ' : '') + (d.enc || '–') + (d.hw === true ? ' · hardware' : d.hw === false ? ' · software' : '') + (d.sendRes ? ' · ' + d.sendRes : ''));
       row('Decoded / displayed fps', (n.decFps != null ? Math.round(n.decFps) : '–') + ' / ' + presented.fps);
