@@ -297,6 +297,47 @@ ipcMain.handle('cursor-hide', () => new Promise((resolve) => {
   p.send({ cmd: 'hide' });
 }));
 ipcMain.on('cursor-restore', () => cursorRestore());
+// ---- received files: Downloads/BridgeDesk ----
+const recvFiles = new Map();
+function safeName(n) {
+  n = path.basename(String(n || 'file')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^[. ]+|[. ]+$/g, '').slice(0, 180);
+  if (!n || /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(n)) n = 'file_' + n;
+  return n;
+}
+ipcMain.handle('file-begin', (_e, id, name, size) => {
+  try {
+    if (!(size >= 0) || size > 4 * 1024 ** 3) return { ok: false, error: 'too large' };
+    const dir = path.join(app.getPath('downloads'), 'BridgeDesk');
+    fs.mkdirSync(dir, { recursive: true });
+    const base = safeName(name), ext = path.extname(base), stem = base.slice(0, base.length - ext.length);
+    let target = path.join(dir, base);
+    for (let i = 1; fs.existsSync(target) || fs.existsSync(target + '.part'); i++) target = path.join(dir, stem + ' (' + i + ')' + ext);
+    const ws = fs.createWriteStream(target + '.part');
+    ws.on('error', () => {});
+    recvFiles.set(id, { ws, target, size, got: 0 });
+    return { ok: true, name: path.basename(target) };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.on('file-chunk', (_e, id, data) => {
+  const f = recvFiles.get(id); if (!f) return;
+  f.got += data.byteLength;
+  if (f.got > f.size) return;
+  f.ws.write(Buffer.from(data));
+});
+ipcMain.handle('file-end', (_e, id, ok) => new Promise((resolve) => {
+  const f = recvFiles.get(id); if (!f) return resolve({ ok: false });
+  recvFiles.delete(id);
+  f.ws.end(() => {
+    if (ok && f.got === f.size) {
+      try { fs.renameSync(f.target + '.part', f.target); } catch (e) { return resolve({ ok: false, error: e.message }); }
+      resolve({ ok: true, path: f.target, name: path.basename(f.target) });
+    } else { try { fs.unlinkSync(f.target + '.part'); } catch { /* */ } resolve({ ok: false, error: 'incomplete' }); }
+  });
+}));
+ipcMain.on('file-open', (_e, p) => {
+  const dir = path.join(app.getPath('downloads'), 'BridgeDesk');
+  if (typeof p === 'string' && path.resolve(p).startsWith(dir)) shell.showItemInFolder(p);
+});
 let gpuName = '';
 app.whenReady().then(() => app.getGPUInfo('basic').then((g) => {
   const d = g && g.gpuDevice && (g.gpuDevice.find((x) => x.active) || g.gpuDevice[0]);

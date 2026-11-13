@@ -579,6 +579,7 @@
       t: 'ok',
       turbo: cap ? { codec: cap.codec, hw: cap.hw, maxH: cap.maxH, maxFps: cap.maxFps } : null,
       localCursor,
+      files: !!(agent && agent.fileBegin),
       control: !!agent,
       name: myName(),
       platform: agent ? agent.platform : 'web',
@@ -591,6 +592,7 @@
     track.addEventListener('ended', () => { if (host.viewer && host.viewer.rawTrack === track) endHostSession(); });
 
     host.viewer.autoTimer = setInterval(autoTick, 1000);
+    hostFileChannel(host.viewer);
 
     // диагностика към зрителя на всеки 2 секунди
     if (agent && agent.inputDiag) {
@@ -657,6 +659,7 @@
     try { v.call && v.call.close(); } catch { /* */ }
     setTimeout(() => { try { v.conn.close(); } catch { /* */ } }, 200);
     if (v.turbo) { try { v.turbo.stop(); } catch { /* */ } v.turbo = null; }
+    try { v.fileDc && v.fileDc.close(); } catch { /* */ }
     if (v.pump) v.pump.stop();
     if (v.stream) v.stream.getTracks().forEach((t) => t.stop());
     clearInterval(v.diagTimer); clearInterval(v.autoTimer);
@@ -815,6 +818,9 @@
         view.control = !!msg.control;
         view.hostPlatform = msg.platform || '';
         view.localCursor = !!msg.localCursor && !!msg.control;
+        view.files = !!msg.files && !!msg.control;
+        $('#btnFile').hidden = !view.files;
+        view.fileDc = view.files ? openFileChannel(view.conn.peerConnection) : null;
         setViewCursor(view.localCursor ? 'default' : 'none');
         // Mac -> Windows/Linux: Cmd работи като Ctrl (Cmd+C, Cmd+V…)
         view.remapMeta = IS_MAC && view.hostPlatform && view.hostPlatform !== 'darwin';
@@ -890,6 +896,7 @@
         }
         if (msg.code === 'blocked') toast(msg.isAdmin ? 'Windows on the remote computer is blocking input (e.g. lock screen or a UAC prompt).' : 'A window running as administrator is active on the remote computer — Windows blocks input to it. Run BridgeDesk as administrator there.', true);
         return;
+      case 'fdone': fileDone(msg); return;
       case 'pong': view.lastPong = performance.now(); $('#stPing').textContent = Math.max(0, Math.round(performance.now() - msg.ts)); return;
       case 'bye': endView('The remote side ended the session'); return;
       default:
@@ -1052,6 +1059,99 @@
     const tag = $('#sesMode'); tag.textContent = 'control · GPU'; tag.className = 'tag control turbo';
     setViewCursor(stage.style.cursor || (view.localCursor ? 'default' : 'none'));
   }
+
+  // =====================================================================
+  //  File transfer (viewer -> remote computer): saved in Downloads\BridgeDesk
+  //  Own ordered, reliable data channel on the control connection (encrypted like everything else).
+  // =====================================================================
+  const FILE_CH = 101, FCHUNK = 60 * 1024, FBUF = 4 * 1024 * 1024;
+  function openFileChannel(pc) {
+    if (!pc) return null;
+    try {
+      const dc = pc.createDataChannel('bd-files', { negotiated: true, id: FILE_CH, ordered: true });
+      dc.binaryType = 'arraybuffer';
+      dc.bufferedAmountLowThreshold = FBUF / 4;
+      return dc;
+    } catch (e) { console.warn('files', e); return null; }
+  }
+  function hostFileChannel(v) {
+    const dc = openFileChannel(v.conn.peerConnection);
+    if (!dc) return;
+    v.fileDc = dc;
+    let chain = Promise.resolve();
+    const names = new Map();
+    dc.onmessage = (ev) => {
+      const b = new Uint8Array(ev.data), type = b[0], dv = new DataView(ev.data), id = dv.getUint32(1);
+      chain = chain.then(async () => {
+        if (!agent || !agent.fileBegin) { if (type === 3) v.conn.send({ t: 'fdone', id, ok: false, error: 'this computer cannot receive files' }); return; }
+        if (type === 1) {
+          const size = dv.getFloat64(5), name = new TextDecoder().decode(b.subarray(13));
+          const r = await agent.fileBegin(id, name, size);
+          names.set(id, r && r.ok ? r.name : null);
+          if (!r || !r.ok) v.conn.send({ t: 'fdone', id, ok: false, error: (r && r.error) || 'cannot save' });
+        } else if (type === 2) {
+          if (names.get(id)) agent.fileChunk(id, b.slice(5));
+        } else if (type === 3 || type === 4) {
+          if (!names.get(id)) return;
+          const r = await agent.fileEnd(id, type === 3);
+          names.delete(id);
+          if (type === 3) {
+            v.conn.send({ t: 'fdone', id, ok: !!(r && r.ok), name: r && r.name, error: r && r.error });
+            if (r && r.ok) { toast('Received file "' + r.name + '" — saved in Downloads › BridgeDesk'); host.lastReceived = r.path; }
+          }
+        }
+      }).catch((e) => console.warn('file', e));
+    };
+    // session dropped mid-transfer: discard the half-written files
+    dc.onclose = () => { chain = chain.then(async () => { for (const [id, n] of names) if (n) await agent.fileEnd(id, false); names.clear(); }); };
+  }
+
+  let fileSeq = 0, fileBusy = false;
+  const fileQueue = [], fileWait = new Map();
+  function sendFiles(list) {
+    if (!view.files || !view.fileDc) return toast('The remote computer cannot receive files (update BridgeDesk there).', true);
+    for (const f of list) fileQueue.push(f);
+    if (!fileBusy) pumpFiles();
+  }
+  function fileDone(msg) {
+    const w = fileWait.get(msg.id); if (!w) return;
+    fileWait.delete(msg.id); w(msg);
+  }
+  async function pumpFiles() {
+    fileBusy = true;
+    let sent = 0, failed = 0;
+    while (fileQueue.length) {
+      const f = fileQueue.shift(), dc = view.fileDc;
+      if (!dc || view.ended) { failed++; continue; }
+      if (dc.readyState !== 'open') await new Promise((r) => { dc.addEventListener('open', r, { once: true }); setTimeout(r, 5000); });
+      if (dc.readyState !== 'open') { failed++; continue; }
+      const id = ++fileSeq;
+      const nameB = new TextEncoder().encode(f.name);
+      const head = new Uint8Array(13 + nameB.length); const hv = new DataView(head.buffer);
+      head[0] = 1; hv.setUint32(1, id); hv.setFloat64(5, f.size); head.set(nameB, 13);
+      const done = new Promise((r) => fileWait.set(id, r));
+      dc.send(head);
+      let off = 0, lastShow = 0, aborted = false;
+      while (off < f.size) {
+        if (view.ended || dc.readyState !== 'open') { aborted = true; break; }
+        if (dc.bufferedAmount > FBUF) { await new Promise((r) => { dc.addEventListener('bufferedamountlow', r, { once: true }); setTimeout(r, 1000); }); continue; }
+        const part = new Uint8Array(await f.slice(off, off + FCHUNK).arrayBuffer());
+        const pkt = new Uint8Array(5 + part.length); pkt[0] = 2; new DataView(pkt.buffer).setUint32(1, id); pkt.set(part, 5);
+        dc.send(pkt);
+        off += part.length;
+        if (performance.now() - lastShow > 300) { lastShow = performance.now(); toast('Sending "' + f.name + '" — ' + Math.floor(off * 100 / Math.max(1, f.size)) + '%'); }
+      }
+      if (aborted) { fileWait.delete(id); failed++; continue; }
+      const end = new Uint8Array(5); end[0] = 3; new DataView(end.buffer).setUint32(1, id);
+      dc.send(end);
+      const r = await Promise.race([done, new Promise((res) => setTimeout(() => res({ ok: false, error: 'no answer' }), 120000))]);
+      if (r.ok) sent++; else { failed++; toast('Could not send "' + f.name + '": ' + (r.error || 'error'), true); }
+    }
+    fileBusy = false;
+    if (sent && !failed) toast(sent === 1 ? 'File sent — saved in Downloads › BridgeDesk on the remote computer' : sent + ' files sent — saved in Downloads › BridgeDesk on the remote computer');
+    else if (sent) toast(sent + ' sent, ' + failed + ' failed', true);
+  }
+
   function stopTurboView(sendOff) {
     if (view.receiver) { try { view.receiver.stop(); } catch { /* */ } view.receiver = null; }
     const was = view.turboActive;
@@ -1166,6 +1266,8 @@
     releaseAllKeys();
     try { view.conn && view.conn.open && view.conn.send({ t: 'bye' }); } catch { /* */ }
     stopTurboView(false);
+    fileQueue.length = 0;
+    try { view.fileDc && view.fileDc.close(); } catch { /* */ } view.fileDc = null;
     try { view.call && view.call.close(); } catch { /* */ }
     try { view.peer && view.peer.destroy(); } catch { /* */ }
     view.peer = view.conn = view.call = null;
@@ -1338,6 +1440,15 @@
   $('#selScreen').onchange = (e) => { send({ t: 'screen', i: Number(e.target.value) }); toast('Switching to screen ' + (Number(e.target.value) + 1) + '…'); stage.focus(); };
   $('#btnWin').onclick = () => { send({ t: 'kt', keys: ['MetaLeft'] }); stage.focus(); };
   $('#btnAltTab').onclick = () => { send({ t: 'kt', keys: ['AltLeft', 'Tab'] }); stage.focus(); };
+  $('#btnFile').onclick = () => $('#fileInput').click();
+  $('#fileInput').onchange = (e) => { const l = [...e.target.files]; e.target.value = ''; if (l.length) sendFiles(l); };
+  stage.addEventListener('dragover', (e) => { if (view.files && e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  stage.addEventListener('drop', (e) => {
+    if (!view.files || !e.dataTransfer) return;
+    e.preventDefault();
+    const l = [...e.dataTransfer.files].filter((f) => f.size > 0 || f.type);
+    if (l.length) sendFiles(l); else toast('Folders cannot be sent — send the files inside them.', true);
+  });
   $('#btnClip').onclick = async () => {
     try {
       const text = agent ? await agent.getClipboard() : await navigator.clipboard.readText();

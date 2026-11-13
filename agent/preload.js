@@ -43,4 +43,8 @@ contextBridge.exposeInMainWorld('most', {
   updateState: () => ipcRenderer.invoke('update-state'),
   checkUpdates: () => ipcRenderer.send('update-check'),
   installUpdate: () => ipcRenderer.send('update-install'),
+  fileBegin: (id, name, size) => ipcRenderer.invoke('file-begin', id, name, size),
+  fileChunk: (id, data) => ipcRenderer.send('file-chunk', id, data),
+  fileEnd: (id, ok) => ipcRenderer.invoke('file-end', id, ok),
+  openReceived: (p) => ipcRenderer.send('file-open', p),
 });
