@@ -16,6 +16,11 @@ process.on('message', (m) => {
       const s = c.shape();
       if (s !== last) { last = s; process.send({ shape: s }); }
     }, 40);
+  } else if (m.cmd === 'show') {
+    // the person at this computer is moving the mouse: show the real cursor for now (shape polling keeps running)
+    c.restore();
+  } else if (m.cmd === 'rehide') {
+    c.hide();
   } else if (m.cmd === 'restore') {
     stop(); c.restore();
     process.send({ restored: true });

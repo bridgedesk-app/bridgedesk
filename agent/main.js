@@ -32,7 +32,29 @@ function spawnCursorHelper() {
     return p;
   } catch (e) { console.error('[cursor]', e.message); return null; }
 }
+// The person sitting at this computer must still see their own mouse. While the cursor is hidden for a
+// session, watch the real cursor: if it moves without input from the viewer, it is the local person ->
+// show the cursor until they stop for a moment, then hide it again.
+let lastInjectAt = 0, localShown = false, localMoveAt = 0, lastPos = null, localTimer = null;
+function startLocalWatch() {
+  clearInterval(localTimer);
+  lastPos = null; localShown = false;
+  localTimer = setInterval(() => {
+    if (!cursorProc || !cursorHidden) return;
+    let p; try { p = screen.getCursorScreenPoint(); } catch { return; }
+    const now = Date.now();
+    if (lastPos && (Math.abs(p.x - lastPos.x) > 1 || Math.abs(p.y - lastPos.y) > 1) && now - lastInjectAt > 300) localMoveAt = now;
+    lastPos = p;
+    if (now - localMoveAt < 2500) {
+      if (!localShown) { localShown = true; try { cursorProc.send({ cmd: 'show' }); } catch { /* */ } }
+    } else if (localShown) {
+      localShown = false; try { cursorProc.send({ cmd: 'rehide' }); } catch { /* */ }
+    }
+  }, 60);
+}
+function stopLocalWatch() { clearInterval(localTimer); localTimer = null; localShown = false; }
 function cursorRestore() {
+  stopLocalWatch();
   if (!cursorProc) return;
   cursorHidden = false;
   try { cursorProc.send({ cmd: 'restore', exit: true }); } catch { /* */ }
@@ -261,7 +283,7 @@ ipcMain.handle('select-screen', (_e, id) => {
     .then((src) => { const s = src.find((x) => x.id === id); if (s) input.setDisplay(s.display_id); }).catch(() => {});
   return true;
 });
-ipcMain.on('input', (_e, msg) => input.handle(msg));
+ipcMain.on('input', (_e, msg) => { if (msg && (msg.t === 'mm' || msg.t === 'md' || msg.t === 'mu' || msg.t === 'wh')) lastInjectAt = Date.now(); input.handle(msg); });
 ipcMain.handle('cursor-hide', () => new Promise((resolve) => {
   if (process.platform !== 'win32') return resolve(false);
   if (!cursorProc) cursorProc = spawnCursorHelper();
@@ -269,7 +291,7 @@ ipcMain.handle('cursor-hide', () => new Promise((resolve) => {
   const p = cursorProc;
   const t = setTimeout(() => resolve(false), 2000);
   const onMsg = (m) => {
-    if (m && 'hidden' in m) { clearTimeout(t); p.off('message', onMsg); cursorHidden = !!m.hidden; resolve(!!m.hidden); }
+    if (m && 'hidden' in m) { clearTimeout(t); p.off('message', onMsg); cursorHidden = !!m.hidden; if (cursorHidden) startLocalWatch(); resolve(!!m.hidden); }
   };
   p.on('message', onMsg);
   p.send({ cmd: 'hide' });

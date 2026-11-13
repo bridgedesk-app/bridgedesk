@@ -437,7 +437,7 @@
     const pc = v.conn.peerConnection;
     if (!cap || !pc || !v.rawTrack) { v.conn.send({ t: 'turbo-no', reason: cap ? 'no-channel' : 'no-hardware-encoder' }); return; }
     const q = presetFor(host.quality || DEFAULT_Q);
-    v.turbo = window.BDTurbo.createSender({ pc, track: v.rawTrack, codec: cap.codec, hw: cap.hw, latency: cap.latency, quality: { maxH: q.maxH, fps: q.fps, bitrate: q.maxBitrate } });
+    v.turbo = window.BDTurbo.createSender({ pc, track: v.rawTrack, codec: cap.codec, hw: cap.hw, latency: cap.latency, limit: { maxH: cap.maxH, maxFps: cap.maxFps }, quality: { maxH: q.maxH, fps: q.fps, bitrate: q.maxBitrate } });
     // pause the WebRTC video while the GPU engine runs (saves the CPU it was burning)
     if (v.rtcSender) v.rtcSender.replaceTrack(null).catch(() => {});
     v.conn.send({ t: 'turbo-ok', codec: cap.codec, hw: cap.hw, sw: !!sw });
@@ -577,7 +577,7 @@
     const cap = await turboCap();
     conn.send({
       t: 'ok',
-      turbo: cap ? { codec: cap.codec, hw: cap.hw } : null,
+      turbo: cap ? { codec: cap.codec, hw: cap.hw, maxH: cap.maxH, maxFps: cap.maxFps } : null,
       localCursor,
       control: !!agent,
       name: myName(),
@@ -745,6 +745,22 @@
   // =====================================================================
   const view = { peer: null, conn: null, call: null, id: null, control: false, stats: null, ping: null, timeout: null, held: new Set(), ended: true };
 
+  // AnyDesk-style: if a running session drops (network hiccup, Wi-Fi switch, sleep), reconnect by itself
+  // with the same password instead of throwing the user back to the start screen.
+  let reconn = { n: 0 };
+  function connectionLost() {
+    if (view.ended || !view.sessionShown || !view.id) return false;
+    if (reconn.id !== view.id || performance.now() - (reconn.at || 0) > 60000) reconn = { id: view.id, n: 0 };
+    if (reconn.n >= 4) return false;
+    reconn.n++; reconn.at = performance.now();
+    const id = view.id, pass = view.pass, opts = { remember: view.remember, usedSaved: view.usedSaved };
+    endView(null);
+    showConnecting('Connection lost', 'Reconnecting automatically (attempt ' + reconn.n + ')…');
+    $('#ovConnecting').hidden = false;
+    view.retryTimer = setTimeout(() => { if (view.ended) connect(id, pass, false, opts); }, 1500 * reconn.n);
+    return true;
+  }
+
   function connect(rawId, pass, isRetry, opts) {
     opts = opts || {};
     const id = cleanId(rawId);
@@ -765,7 +781,7 @@
       view.conn = conn;
       conn.on('open', () => conn.send({ t: 'hello', pass: pass || '', name: myName(), v: 1 }));
       conn.on('data', onHostMsg);
-      conn.on('close', () => endView(view.call ? 'The session ended' : null));
+      conn.on('close', () => { if (!connectionLost()) endView(view.call ? 'The session ended' : null); });
       conn.on('error', () => {});
     });
     peer.on('call', (call) => {
@@ -773,10 +789,10 @@
       view.call = call;
       call.answer(undefined, { sdpTransform: tuneAnswer });
       call.on('stream', (s) => { lowLatency(call.peerConnection); showSession(s); });
-      call.on('close', () => { if (view.call === call && !view.recalling) endView('The session ended'); });
+      call.on('close', () => { if (view.call === call && !view.recalling && !connectionLost()) endView('The session ended'); });
       const pc = call.peerConnection;
       if (pc) pc.addEventListener('connectionstatechange', () => {
-        if (pc.connectionState === 'failed') endView('Could not establish a direct connection (try another network or a TURN server).', true);
+        if (pc.connectionState === 'failed' && !connectionLost()) endView('Could not establish a direct connection (try another network or a TURN server).', true);
       });
     });
     peer.on('error', (e) => {
@@ -874,7 +890,7 @@
         }
         if (msg.code === 'blocked') toast(msg.isAdmin ? 'Windows on the remote computer is blocking input (e.g. lock screen or a UAC prompt).' : 'A window running as administrator is active on the remote computer — Windows blocks input to it. Run BridgeDesk as administrator there.', true);
         return;
-      case 'pong': $('#stPing').textContent = Math.max(0, Math.round(performance.now() - msg.ts)); return;
+      case 'pong': view.lastPong = performance.now(); $('#stPing').textContent = Math.max(0, Math.round(performance.now() - msg.ts)); return;
       case 'bye': endView('The remote side ended the session'); return;
       default:
     }
@@ -943,7 +959,7 @@
     row('Video engine', r ? 'GPU (WebCodecs) · ' + (t && t.hw ? 'hardware encode' : 'software encode') + ' · ' + (r.hw ? 'hardware decode' : 'software decode')
       : 'Standard (WebRTC)' + (view.receiver ? ' · GPU starting…' : ''));
     row('Mode', d.preset || '–');
-    row('GPU engine on remote', view.hostTurbo ? (view.hostTurbo.hw ? 'available · ' + view.hostTurbo.codec : 'software only') : 'not available');
+    row('GPU engine on remote', view.hostTurbo ? (view.hostTurbo.hw ? 'available · ' + view.hostTurbo.codec + (view.hostTurbo.maxH ? ' · up to ' + view.hostTurbo.maxH + 'p' + view.hostTurbo.maxFps : '') : 'software only') : 'not available');
 
     sec('Pipeline (capture → encode → network → decode → display)');
     if (r && t) {
@@ -1169,7 +1185,11 @@
   function startStats() {
     let lastBytes = 0, lastTs = 0;
     clearInterval(view.stats); clearInterval(view.ping);
-    view.ping = setInterval(() => { try { view.conn.send({ t: 'ping', ts: performance.now() }); } catch { /* */ } }, 2000);
+    view.lastPong = performance.now();
+    view.ping = setInterval(() => {
+      try { view.conn.send({ t: 'ping', ts: performance.now() }); } catch { /* */ }
+      if (view.sessionShown && performance.now() - view.lastPong > 8000) connectionLost();
+    }, 2000);
     view.net = {};
     view.stats = setInterval(async () => {
       presentedTick();

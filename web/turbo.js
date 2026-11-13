@@ -55,26 +55,32 @@
       return !!r.supported;
     } catch { return false; }
   }
+  // Hardware encoders (e.g. Intel UHD via Media Foundation) often refuse 1080p60 but accept 1080p30 or
+  // 900p/720p. Walk down a ladder and return the best mode the GPU really accepts.
+  const LADDER = [[1920, 1080, 60], [1920, 1080, 30], [1600, 900, 60], [1600, 900, 30], [1280, 720, 60], [1280, 720, 30]];
   async function hardwareEncoder(width = 1920, height = 1080, allowSoftware = false) {
     if (!SUPPORTED) return null;
+    const steps = LADDER.filter(([w, h]) => h <= height && w <= width);
     for (const accel of allowSoftware ? ['prefer-hardware', 'no-preference'] : ['prefer-hardware']) {
-      for (const codec of CANDIDATES) {
-        // realtime first; some hardware encoders only accept the default latency mode
-        for (const latency of ['realtime', null]) {
-          if (await supported(codec, accel, width, height, 60, latency)) return { codec, hw: accel === 'prefer-hardware', latency };
+      for (const [w, h, fps] of steps) {
+        for (const codec of CANDIDATES) {
+          // realtime first; some hardware encoders only accept the default latency mode
+          for (const latency of ['realtime', null]) {
+            if (await supported(codec, accel, w, h, fps, latency)) return { codec, hw: accel === 'prefer-hardware', latency, maxH: h, maxFps: fps };
+          }
         }
       }
     }
     return null;
   }
-  // full matrix for diagnostics: which codecs pass in hardware at 1080p60 / 720p30
+  // diagnostics: the best hardware mode per codec
   async function probe() {
     if (!SUPPORTED) return 'WebCodecs not available';
     const out = [];
     for (const codec of CANDIDATES) {
-      const a = await supported(codec, 'prefer-hardware', 1920, 1080, 60, 'realtime') || await supported(codec, 'prefer-hardware', 1920, 1080, 60, null);
-      const b = a || await supported(codec, 'prefer-hardware', 1280, 720, 30, null);
-      if (a) out.push(codec + ':1080p60'); else if (b) out.push(codec + ':720p30');
+      for (const [w, h, fps] of LADDER) {
+        if (await supported(codec, 'prefer-hardware', w, h, fps, 'realtime') || await supported(codec, 'prefer-hardware', w, h, fps, null)) { out.push(codec + ':' + h + 'p' + fps); break; }
+      }
     }
     return out.length ? out.join(', ') : 'no hardware encoder via WebCodecs';
   }
@@ -92,7 +98,9 @@
   // =====================================================================
   //  HOST: encoder + sender
   // =====================================================================
-  function createSender({ pc, track, codec, hw, latency, quality }) {
+  function createSender({ pc, track, codec, hw, latency, quality, limit }) {
+    const lim = limit || {};
+    const clampQ = (x) => { if (lim.maxH && (!x.maxH || x.maxH > lim.maxH)) x.maxH = lim.maxH; if (lim.maxFps && x.fps > lim.maxFps) x.fps = lim.maxFps; return x; };
     const dc = openChannel(pc);
     let src = null, reader = null, gen = 0;           // current capture source (can be swapped: monitor switch)
     const st = {
@@ -100,7 +108,7 @@
       encMs: 0, encN: 0, fps: { cap: 0, enc: 0 }, kbps: 0, w: 0, h: 0, bitrate: 0, codec, hw,
     };
     let encoder = null, cfgKey = '', frameId = 0, needKey = true, lastKeyAt = 0, stopped = false;
-    let last = null, lastFrameAt = 0, q = Object.assign({}, quality);
+    let last = null, lastFrameAt = 0, q = clampQ(Object.assign({}, quality));
     const sentAt = new Map();                        // timestamp → encode start (encode latency)
     const win = { t: performance.now(), cap: 0, enc: 0, bytes: 0 };
 
@@ -214,7 +222,7 @@
       stats: st,
       requestKey() { needKey = true; },
       setTrack,
-      setQuality(nq) { q = Object.assign({}, q, nq); cfgKey = ''; needKey = true; },
+      setQuality(nq) { q = clampQ(Object.assign({}, q, nq)); cfgKey = ''; needKey = true; },
       encodeLatency() { return st.encN ? st.encMs / st.encN : 0; },
       resetLatency() { st.encMs = 0; st.encN = 0; },
       stop() {
